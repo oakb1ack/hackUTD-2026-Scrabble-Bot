@@ -59,15 +59,25 @@ export interface StrategyParams {
   fiveLetterMinReward: number;
   // Small premium for letters that unlock many words (flexibility).
   breadthWeight: number;
+  // Baseline worth of a letter = faceMult * its Scrabble value. Nearly
+  // every tile we buy ends up in a 7-letter word (3x), so a Z is worth
+  // ~30 on its own even when no specific word is in sight yet. Live
+  // market (Nov 2026): Z 25, J/X 23, K/Q 17, H/Y/F 15, B/C/M/P 14.
+  faceMult: number;
+  // Q needs a U; discount its baseline.
+  qFactor: number;
+  // A letter that completes a word right now is worth the pacing floor
+  // plus this fraction of the immediate gain, so it outbids plain glue.
+  immediateBonus: number;
 }
 
 export const PARAMS: StrategyParams = {
-  valueMult: 1.5,
+  valueMult: 1.0,
   potentialWeight: 0.9,
   pOneMissing: 0.35,
   pTwoMissing: 0.1,
   maxSpendFrac: 0.6,
-  targetWinFrac: 0.2,
+  targetWinFrac: 0.25,
   usefulThreshold: 0,
   endgameBag: 8,
   playNowLen: 7,
@@ -76,6 +86,9 @@ export const PARAMS: StrategyParams = {
   holdMaxRack: 13,
   fiveLetterMinReward: 99, // effectively: never play 5-letter words early
   breadthWeight: 0.6,
+  faceMult: 2.5,
+  qFactor: 0.6,
+  immediateBonus: 0.5,
 };
 
 // ---------- Bidding ----------
@@ -101,6 +114,7 @@ export function decideBid(ctx: BidContext): number {
   if (slot < 0 || slot >= 26) return 0;
   if (ctx.myBalance <= 0) return 0;
 
+  const face = LETTER_VALUE[letter] ?? 1;
   const { counts, total } = rackCounts(ctx.myRack);
   const withLetter = new Uint8Array(counts);
   withLetter[slot] = withLetter[slot]! + 1;
@@ -145,8 +159,10 @@ export function decideBid(ctx: BidContext): number {
   }
   const flexibility = p.breadthWeight * Math.log1p(breadth);
 
+  let baseline = p.faceMult * face;
+  if (letter === "Q") baseline *= p.qFactor;
   let value =
-    Math.max(immediate, p.potentialWeight * potential) + flexibility;
+    Math.max(immediate, p.potentialWeight * potential, baseline) + flexibility;
 
   // Duplicates of a letter we already hold two of are rarely useful.
   if (counts[slot]! >= 2) value *= 0.5;
@@ -165,12 +181,14 @@ export function decideBid(ctx: BidContext): number {
   // Pacing floor: unspent balance at match end is worth nothing, so a
   // useful letter is worth at least our fair share of the remaining
   // budget. Under Vickrey we only pay the runner-up's bid anyway.
-  const face = LETTER_VALUE[letter] ?? 1;
   let bid = Math.round(value * p.valueMult);
   if (value >= p.usefulThreshold) {
     const expectedWins = Math.max(2, remaining * p.targetWinFrac);
     const perTile = Math.floor(ctx.myBalance / expectedWins);
     bid = Math.max(bid, perTile, Math.min(face, 3));
+    if (immediate > 0) {
+      bid = Math.max(bid, perTile + Math.round(p.immediateBonus * immediate));
+    }
   }
   if (endgame && bid > 0) {
     // Nothing to save money for; outbid the sims' face-value habit.

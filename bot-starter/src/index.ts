@@ -226,6 +226,12 @@ function subscribeToMatch(conn: DbConnection, matchId: bigint) {
     conn
       .subscriptionBuilder()
       .onApplied(() => {
+        // After a restart we see our old matches too; drop finished ones.
+        const m = conn.db.matchState.id.find(matchId);
+        if (m && m.status.tag === "Ended") {
+          unsubscribeFromMatch(matchId);
+          return;
+        }
         // Catch an auction that opened before the subscription landed.
         for (const a of conn.db.auction.iter()) {
           if (a.matchId === matchId && a.status.tag === "Open") {

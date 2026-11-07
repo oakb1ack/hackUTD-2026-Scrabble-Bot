@@ -89,9 +89,10 @@ function simBid(kind: SimKind, letter: string, balance: number, jitter: number, 
   else if (kind === "ValueBidder") base = v;
   else if (kind === "Aggressive") base = v + (vowel ? 4 : 2);
   else {
-    // Hoarder: ~11 median, a bit more for high-value letters, spends
-    // faster as the bag runs down. Jitter is wider (±4) for a human field.
-    base = 9 + Math.round(v / 3) + jitter * 2;
+    // Hoarder, calibrated on live matches 42700-42750: 1-point letters
+    // clear at ~10, D/G ~12, B/C/M/P ~14, F/H/V/W/Y ~15, K/Q ~17,
+    // J/X ~23, Z ~25. Spends faster as the bag runs down. Jitter ±4.
+    base = 9 + Math.round(v * 1.5) + jitter * 2;
     if (bagRemaining <= 10) base = Math.max(base, Math.floor(balance / 2));
   }
   return Math.max(0, Math.min(Math.max(base + jitter, 1), balance));

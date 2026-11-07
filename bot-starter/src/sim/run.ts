@@ -124,12 +124,13 @@ function report() {
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
   base: {},
-  hold7: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13 },
-  hold7cash: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, cashFloor: 30 },
-  hold7win20: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, targetWinFrac: 0.2 },
-  hold7win10: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, targetWinFrac: 0.1 },
-  hold6: { fiveLetterMinReward: 99, holdMaxRack: 12 },
-  pot15: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, potentialWeight: 1.5 },
+  imm0: { immediateBonus: 0 },
+  imm05: { immediateBonus: 0.5 },
+  imm15: { immediateBonus: 1.5 },
+  face2: { faceMult: 2 },
+  face275: { faceMult: 2.75 },
+  win25: { targetWinFrac: 0.25 },
+  win15: { targetWinFrac: 0.15 },
 };
 
 const variantArg = (() => {
