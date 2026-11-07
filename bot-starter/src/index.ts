@@ -445,10 +445,16 @@ function main() {
       currentConn = conn;
       onConnect(conn, identity, token);
     })
-    .onConnectError((_ctx: ErrorContext, err: Error) =>
-      console.error("connect error:", err.message),
-    )
-    .onDisconnect(() => console.log("disconnected"))
+    .onConnectError((_ctx: ErrorContext, err: Error) => {
+      console.error("connect error:", err.message, "- retrying in 3s");
+      setTimeout(main, 3000);
+    })
+    .onDisconnect(() => {
+      console.log("disconnected - reconnecting in 3s");
+      currentConn = null;
+      matchSubs.clear();
+      setTimeout(main, 3000);
+    })
     .build();
 }
 
