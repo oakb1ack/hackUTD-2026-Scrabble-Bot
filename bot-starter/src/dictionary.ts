@@ -45,6 +45,33 @@ export interface IndexedWord {
   word: string;
   reward: number;
   counts: Uint8Array; // 26 slots
+  // Bit i set when the word uses letter i at least once / twice / three
+  // times. Lets a rack reject most words with a few AND-ops before the
+  // 26-compare, and gives an exact missing-tile count (up to triples)
+  // from three popcounts.
+  mask1: number;
+  mask2: number;
+  mask3: number;
+}
+
+// Rack masks matching IndexedWord.mask1 / mask2 / mask3.
+export function rackMasks(rack: Uint8Array): [number, number, number] {
+  let m1 = 0;
+  let m2 = 0;
+  let m3 = 0;
+  for (let i = 0; i < 26; i++) {
+    const n = rack[i]!;
+    if (n >= 1) m1 |= 1 << i;
+    if (n >= 2) m2 |= 1 << i;
+    if (n >= 3) m3 |= 1 << i;
+  }
+  return [m1, m2, m3];
+}
+
+export function popcount(x: number): number {
+  x = x - ((x >>> 1) & 0x55555555);
+  x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+  return (((x + (x >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
 }
 
 export interface DictionaryIndex {
@@ -58,6 +85,13 @@ export interface DictionaryIndex {
   byLength: IndexedWord[];
   // byReward filtered to words containing each letter, for valuation.
   containing: Map<string, IndexedWord[]>;
+  // Struct-of-arrays view of byReward (same order) for tight scans:
+  // letter masks, word length and reward as typed arrays.
+  rMask1: Int32Array;
+  rMask2: Int32Array;
+  rMask3: Int32Array;
+  rLen: Uint8Array;
+  rReward: Uint16Array;
 }
 
 let cached: DictionaryIndex | null = null;
@@ -71,7 +105,8 @@ export function buildIndex(words: readonly string[]): DictionaryIndex {
     seen.add(w);
     const counts = new Uint8Array(26);
     for (let i = 0; i < w.length; i++) counts[w.charCodeAt(i) - A]!++;
-    entries.push({ word: w, reward: rewardFor(w), counts });
+    const [mask1, mask2, mask3] = rackMasks(counts);
+    entries.push({ word: w, reward: rewardFor(w), counts, mask1, mask2, mask3 });
   }
   const byReward = [...entries].sort((a, b) => b.reward - a.reward);
   const byLength = [...entries].sort((a, b) => b.word.length - a.word.length);
@@ -88,7 +123,22 @@ export function buildIndex(words: readonly string[]): DictionaryIndex {
       byReward.filter((e) => e.counts[s]! > 0),
     );
   }
-  cached = { byReward, byRewardMaxLen, byLength, containing };
+  const n = byReward.length;
+  const rMask1 = new Int32Array(n);
+  const rMask2 = new Int32Array(n);
+  const rMask3 = new Int32Array(n);
+  const rLen = new Uint8Array(n);
+  const rReward = new Uint16Array(n);
+  byReward.forEach((e, i) => {
+    rMask1[i] = e.mask1;
+    rMask2[i] = e.mask2;
+    rMask3[i] = e.mask3;
+    rLen[i] = e.word.length;
+    rReward[i] = e.reward;
+  });
+  cached = {
+    byReward, byRewardMaxLen, byLength, containing, rMask1, rMask2, rMask3, rLen, rReward,
+  };
   return cached;
 }
 
@@ -129,7 +179,9 @@ export function bestPlay(
     total < index.byRewardMaxLen.length
       ? index.byRewardMaxLen[total]!
       : index.byReward;
+  const [m1, m2, m3] = rackMasks(rack);
   for (const e of list) {
+    if (e.mask1 & ~m1 || e.mask2 & ~m2 || e.mask3 & ~m3) continue;
     if (e.word.length > total) continue;
     if (canSpellCounts(e, rack)) return e;
   }
@@ -145,8 +197,10 @@ export function longestPlay(
   index: DictionaryIndex = getIndex(),
 ): IndexedWord | null {
   if (total < minLen) return null;
+  const [m1, m2, m3] = rackMasks(rack);
   for (const e of index.byLength) {
     if (e.word.length < minLen) break;
+    if (e.mask1 & ~m1 || e.mask2 & ~m2 || e.mask3 & ~m3) continue;
     if (e.word.length > total) continue;
     if (canSpellCounts(e, rack)) return e;
   }
@@ -182,3 +236,72 @@ export function missingCount(word: IndexedWord, rack: Uint8Array): number {
   }
   return m;
 }
+
+// Words we could plausibly complete after winning at most `maxMissing`
+// more tiles (exact up to triple letters, via the three masks), scanning
+// best-reward-first and stopping after `limit` hits. Returns indices into
+// index.byReward. Used by the Monte Carlo valuation: each rollout scans
+// this list instead of the whole index. Any word spellable from a subset
+// of `rack` + maxMissing tiles is in the list (up to the reward
+// truncation), so the same list serves the rack with and without the
+// offered letter.
+export function reachableCandidates(
+  rack: Uint8Array,
+  total: number,
+  maxMissing: number,
+  limit: number,
+  minLen = 4,
+  index: DictionaryIndex = getIndex(),
+): Int32Array {
+  const maxLen = total + maxMissing;
+  const { rMask1, rMask2, rMask3, rLen } = index;
+  const out = new Int32Array(limit);
+  let outN = 0;
+  const n = rMask1.length;
+  const [m1, m2, m3] = rackMasks(rack);
+  const nm1 = ~m1;
+  const nm2 = ~m2;
+  const nm3 = ~m3;
+  for (let k = 0; k < n && outN < limit; k++) {
+    const len = rLen[k]!;
+    if (len < minLen || len > maxLen) continue;
+    const a = rMask1[k]! & nm1;
+    const b = rMask2[k]! & nm2;
+    const c = rMask3[k]! & nm3;
+    if (popcount(a) + popcount(b) + popcount(c) <= maxMissing) out[outN++] = k;
+  }
+  return out.subarray(0, outN);
+}
+
+// Best spellable reward for two racks where `big` is `small` plus one
+// tile, in one reward-ordered pass over a candidate list: whatever the
+// small rack spells, the big rack spells too, so the big rack's best is
+// found first and the scan stops at the small rack's best. Returns
+// [bestSmall, bestBig] (0 when nothing is spellable).
+export function bestPairValue(
+  cands: Int32Array,
+  small: Uint8Array,
+  big: Uint8Array,
+  index: DictionaryIndex = getIndex(),
+): [number, number] {
+  const { rMask1, rMask2, rMask3, rReward, byReward } = index;
+  const [s1, s2, s3] = rackMasks(small);
+  const [b1, b2, b3] = rackMasks(big);
+  const ns1 = ~s1, ns2 = ~s2, ns3 = ~s3;
+  const nb1 = ~b1, nb2 = ~b2, nb3 = ~b3;
+  let bestBig = 0;
+  for (let j = 0; j < cands.length; j++) {
+    const k = cands[j]!;
+    const w1 = rMask1[k]!;
+    const w2 = rMask2[k]!;
+    const w3 = rMask3[k]!;
+    if (w1 & nb1 || w2 & nb2 || w3 & nb3) continue;
+    const e = byReward[k]!;
+    if (!canSpellCounts(e, big)) continue; // 4+ of one letter: rare
+    if (bestBig === 0) bestBig = rReward[k]!;
+    if (w1 & ns1 || w2 & ns2 || w3 & ns3) continue;
+    if (canSpellCounts(e, small)) return [rReward[k]!, bestBig];
+  }
+  return [0, bestBig];
+}
+

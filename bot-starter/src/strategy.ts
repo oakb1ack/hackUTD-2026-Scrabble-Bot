@@ -19,10 +19,12 @@
 import {
   bestPlay,
   DEFAULT_BAG,
+  bestPairValue,
   getIndex,
   greedyRackValue,
   missingCount,
   rackCounts,
+  reachableCandidates,
   LETTER_VALUE,
   type DictionaryIndex,
 } from "./dictionary.js";
@@ -165,6 +167,30 @@ export interface StrategyParams {
   // crunchReward in hand, cash it so we can keep buying.
   crunchBalance: number;
   crunchReward: number;
+  // --- Monte Carlo expected-value valuation (experimental) ---
+  // mcSamples rollouts estimate E[rack value | win this letter] minus
+  // E[rack value | don't], where each rollout draws K future tiles from
+  // the estimated bag and values rack(+letter)+K with a reward-sorted
+  // candidate list. 0 disables it. K = clamp(remaining * mcKFrac,
+  // mcKMin, mcKMax) unless mcK > 0 fixes it. mcWeight scales the gain
+  // before it competes with the market baseline; mcCandidates bounds the
+  // per-call candidate list (and hence the per-rollout scan).
+  mcSamples: number;
+  mcK: number;
+  mcKFrac: number;
+  mcKMin: number;
+  mcKMax: number;
+  mcWeight: number;
+  mcCandidates: number;
+  // Candidate words must be within this many tiles of rack+letter. Words
+  // missing 4+ specific tiles almost never complete in K draws, and
+  // dropping them keeps the per-rollout scan short.
+  mcMissing: number;
+  // 0: MC gain competes with the market baseline (can only raise bids).
+  // 1: MC replaces the baseline: max(glue market, mcOffset + mcWeight *
+  //    gain), so letters the rollouts rarely use (J/X/Q/K) bid lower.
+  mcMode: number;
+  mcOffset: number;
 }
 
 // Median clearing price by phase; index by bag remaining.
@@ -234,7 +260,105 @@ export const PARAMS: StrategyParams = {
   thinFieldBoost: 1.3,
   crunchBalance: 30,
   crunchReward: 18,
+  // Monte Carlo valuation (see monteCarloGain). Sim A/B vs Hoarders:
+  // mode 1 with offset 2 scored 97 vs 86 for the static premium formula.
+  mcSamples: 64,
+  mcK: 0,
+  mcKFrac: 0.22,
+  mcKMin: 3,
+  mcKMax: 9,
+  mcWeight: 1.0,
+  mcCandidates: 80000,
+  mcMissing: 3,
+  mcMode: 1,
+  mcOffset: 2,
 };
+
+// ---------- Monte Carlo valuation ----------
+
+// Small deterministic PRNG (mulberry32) so a given rack/letter/bag always
+// yields the same bid; seeded from the inputs.
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Expected marginal rack value of winning `slot`, by sampling K future
+ * tiles from `bag` and valuing rack+K with and without the letter using
+ * the same draws (common random numbers). Exposed for tests / tuning.
+ */
+export function monteCarloGain(
+  counts: Uint8Array,
+  total: number,
+  slot: number,
+  bag: Record<string, number>,
+  remaining: number,
+  p: StrategyParams,
+  index: DictionaryIndex,
+): { gain: number; k: number; candidates: number } {
+  const k =
+    p.mcK > 0
+      ? p.mcK
+      : Math.max(p.mcKMin, Math.min(p.mcKMax, Math.round(remaining * p.mcKFrac)));
+  const withLetter = new Uint8Array(counts);
+  withLetter[slot] = withLetter[slot]! + 1;
+  // Candidate words: within mcMissing tiles of rack+letter. Any word the
+  // without-rack can spell from these draws is also in here.
+  const cands = reachableCandidates(
+    withLetter, total + 1, Math.min(k, p.mcMissing), p.mcCandidates, 4, index,
+  );
+  if (cands.length === 0) return { gain: 0, k, candidates: 0 };
+
+  // Bag as a 26-slot pool (never let the offered letter's own copy count).
+  const pool = new Int32Array(26);
+  let poolTotal = 0;
+  for (let i = 0; i < 26; i++) {
+    const n = bag[String.fromCharCode(65 + i)] ?? 0;
+    pool[i] = n;
+    poolTotal += n;
+  }
+  if (poolTotal <= 0) return { gain: 0, k, candidates: cands.length };
+
+  let seed = slot * 7919 + total * 131 + remaining;
+  for (let i = 0; i < 26; i++) seed = (seed * 31 + counts[i]!) | 0;
+  const rnd = mulberry32(seed);
+
+  const draw = new Int32Array(26);
+  const rackA = new Uint8Array(26);
+  const rackB = new Uint8Array(26);
+  let sum = 0;
+  for (let s = 0; s < p.mcSamples; s++) {
+    // Draw K tiles without replacement from the pool.
+    draw.fill(0);
+    let left = poolTotal;
+    const n = Math.min(k, poolTotal);
+    for (let d = 0; d < n; d++) {
+      let r = Math.floor(rnd() * left);
+      let i = 0;
+      for (; i < 25; i++) {
+        const avail = pool[i]! - draw[i]!;
+        if (r < avail) break;
+        r -= avail;
+      }
+      draw[i]!++;
+      left--;
+    }
+    for (let i = 0; i < 26; i++) {
+      rackA[i] = counts[i]! + draw[i]!;
+      rackB[i] = withLetter[i]! + draw[i]!;
+    }
+    const [without, withL] = bestPairValue(cands, rackA, rackB, index);
+    sum += withL - without;
+  }
+  return { gain: sum / p.mcSamples, k, candidates: cands.length };
+}
 
 // ---------- Bidding ----------
 
@@ -313,6 +437,14 @@ export function decideBid(ctx: BidContext): number {
   }
   const flexibility = p.breadthWeight * Math.log1p(breadth);
 
+  // 2b. Monte Carlo: expected marginal best-word reward after K more
+  //     tiles, with vs without this letter (same draws).
+  const remainingNow = ctx.bagRemaining ?? 60;
+  let mcGain = 0;
+  if (p.mcSamples > 0) {
+    mcGain = monteCarloGain(counts, total, slot, bag, remainingNow, p, index).gain;
+  }
+
   // Premiums only on K/J/X (face 5-8); the formula already exceeds the
   // market for Z/Q, and a 35 bid on a Z at auction 15 starved us for the
   // rest of match 42855.
@@ -324,11 +456,15 @@ export function decideBid(ctx: BidContext): number {
       (face >= 5 && face <= 8 ? p.bigPremium : 0),
   );
   if (face >= 10) baseline = Math.min(baseline, p.maxPremiumBid);
+  if (p.mcSamples > 0 && p.mcMode === 1) {
+    // Replace the face-value formula with the sampled expectation; glue
+    // still clears at market so the flywheel keeps turning.
+    baseline = Math.max(p.marketA + p.marketB, p.mcOffset + p.mcWeight * mcGain);
+  }
   // A premium letter bought with the bag nearly empty rarely finds its
   // word (J@30 at bag 15 became JO for 9). Taper the baseline toward the
   // glue price as the bag runs down; completing a word still bids fully
   // through `immediate`.
-  const remainingNow = ctx.bagRemaining ?? 60;
   const taperBag = face >= 8 ? p.premiumTaperBag : p.midPremiumTaperBag;
   if (face >= 4 && remainingNow < taperBag) {
     const glue = p.marketA + p.marketB;
@@ -360,8 +496,11 @@ export function decideBid(ctx: BidContext): number {
   let vowels = 0;
   for (const c of "AEIOU") vowels += counts[c.charCodeAt(0) - 65]!;
   if (isVowel && vowels >= p.vowelCap) baseline *= p.vowelDiscount;
+  // In mode 0 the MC gain competes with the baseline (it rarely wins: the
+  // single-word horizon values glue at ~1-3 and Z at ~20-24).
+  const mcValue = p.mcMode === 0 ? p.mcWeight * mcGain : 0;
   let value =
-    Math.max(immediate, p.potentialWeight * potential, baseline) + flexibility;
+    Math.max(immediate, p.potentialWeight * potential, baseline, mcValue) + flexibility;
 
   // Duplicates of a letter we already hold two of are rarely useful.
   if (counts[slot]! >= 2) value *= 0.5;
