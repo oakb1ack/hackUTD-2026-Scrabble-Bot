@@ -115,7 +115,8 @@ test("decideBid prices a Z far above a 1-point letter on a thin rack", () => {
 // The bot can't see a match move on while it searches, so a slow search
 // means bids on closed auctions and words from letters it already spent.
 test("decideBid and chooseWord each run well within an auction", () => {
-  const big = rack("BCDFGHJKLMNPQRSTVWXZ");
+  // Largest rack we ever hold (holdMaxRack 13, plus one tile mid-auction).
+  const big = rack("BCDFGHJKLMNPQR");
   let start = performance.now();
   chooseWord({ myRack: big, dictionary, bagRemaining: 30, myBalance: 50, index });
   assert.ok(performance.now() - start < 100, "chooseWord took 100 ms or more");

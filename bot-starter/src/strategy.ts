@@ -266,7 +266,15 @@ export function decideBid(ctx: BidContext): number {
   let breadth = 0;
   const candidates = index.containing.get(letter) ?? [];
   const maxLen = total + 3;
+  let scanned = 0;
+  // Racks beyond holdMaxRack don't occur in play (chooseWord cashes out
+  // first); skip the potential scan so a pathological rack can't stall.
+  const scanLimit = total > p.holdMaxRack + 1 ? 0 : 5000;
   for (const w of candidates) {
+    if (scanLimit === 0) break;
+    // Hard bound on work: candidates are reward-sorted, so the first few
+    // thousand hold every word that could matter.
+    if (++scanned > 5000) break;
     if (w.word.length > maxLen || w.word.length < 4) continue;
     // Potential is about improving on what we already have.
     if (w.reward <= before) continue;
