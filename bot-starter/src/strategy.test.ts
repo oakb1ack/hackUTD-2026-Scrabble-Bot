@@ -46,9 +46,23 @@ test("chooseWord holds short words mid-game with a healthy balance", () => {
   assert.equal(w, null);
 });
 
-test("chooseWord takes a long word immediately", () => {
-  const w = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 50, myBalance: 80, index });
-  assert.ok(w !== null && w.length >= 6, `expected a 6+ word, got ${w}`);
+test("chooseWord takes a high-value long word immediately", () => {
+  // JACKETS = 20 face x 3 = 60: worth cashing at any point in the match.
+  const w = chooseWord({ myRack: rack("JACKETS"), dictionary, bagRemaining: 60, myBalance: 80, index });
+  assert.ok(w !== null && w.length >= 7, `expected a 7+ word, got ${w}`);
+});
+
+test("chooseWord holds a cheap 7-letter word early but plays it by midgame", () => {
+  // RETAINS = 7 face x 3 = 21: leaders wait for a premium letter instead.
+  const early = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 60, myBalance: 80, index });
+  assert.equal(early, null);
+  const mid = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 35, myBalance: 80, index });
+  assert.ok(mid !== null && mid.length >= 7, `expected a 7+ word, got ${mid}`);
+});
+
+test("decideBid skips endgame tiles that complete nothing", () => {
+  const b = decideBid({ letter: "V", myBalance: 60, myRack: rack("QZ"), bagRemaining: 3, index });
+  assert.equal(b, 0);
 });
 
 test("decideBid never exceeds balance and is never negative", () => {

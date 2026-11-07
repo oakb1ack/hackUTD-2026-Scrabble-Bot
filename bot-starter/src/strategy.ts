@@ -79,6 +79,27 @@ export interface StrategyParams {
   // A letter that completes a word right now is worth the pacing floor
   // plus this fraction of the immediate gain, so it outbids plain glue.
   immediateBonus: number;
+  // --- From the opponent analysis of Bron (114) and LUCENT (18), Nov 2026 ---
+  // Extra premium on face >= 5 letters (K, J, X, Q, Z). Bron buys 2x our
+  // rate of these and its 7-letter words pay 10 more than ours purely
+  // from letter mix.
+  bigPremium: number;
+  // Holding a Q with no U: bid this much extra on a U.
+  qNeedsU: number;
+  // Glue discipline: multiply baseline by this when the rack already holds
+  // >= vowelCap vowels (we bought 48% vowels; leaders 42%).
+  vowelCap: number;
+  vowelDiscount: number;
+  // Phase pacing: leaders back-load, buying when tiles are cheapest.
+  // targetWinFrac early (bag > 48), mid, late (bag < 23).
+  winFracEarly: number;
+  winFracLate: number;
+  // Early-game play gate: before the bag is down to midgameBag, play a
+  // 7+ word only if it pays at least playNowReward; otherwise keep
+  // building. Leaders' first word averages 45 at auction 26-29; ours was
+  // 35 at auction 13.
+  midgameBag: number;
+  playNowReward: number;
 }
 
 export const PARAMS: StrategyParams = {
@@ -91,8 +112,8 @@ export const PARAMS: StrategyParams = {
   usefulThreshold: 0,
   endgameBag: 8,
   playNowLen: 7,
-  cashFloor: 20,
-  cashMinReward: 4,
+  cashFloor: 12,
+  cashMinReward: 12,
   holdMaxRack: 13,
   fiveLetterMinReward: 99, // effectively: never play 5-letter words early
   breadthWeight: 0.6,
@@ -102,6 +123,14 @@ export const PARAMS: StrategyParams = {
   hvPremium: 3,
   qFactor: 0.6,
   immediateBonus: 0.5,
+  bigPremium: 6,
+  qNeedsU: 8,
+  vowelCap: 3,
+  vowelDiscount: 0.7,
+  winFracEarly: 0.18,
+  winFracLate: 0.35,
+  midgameBag: 40,
+  playNowReward: 40,
 };
 
 // ---------- Bidding ----------
@@ -174,9 +203,20 @@ export function decideBid(ctx: BidContext): number {
 
   let baseline = Math.max(
     p.faceMult * face,
-    p.marketA + p.marketB * face + (face >= 4 ? p.hvPremium : 0),
+    p.marketA +
+      p.marketB * face +
+      (face >= 4 ? p.hvPremium : 0) +
+      (face >= 5 ? p.bigPremium : 0),
   );
-  if (letter === "Q") baseline *= p.qFactor;
+  const haveU = counts["U".charCodeAt(0) - 65]! > 0;
+  const haveQ = counts["Q".charCodeAt(0) - 65]! > 0;
+  if (letter === "Q" && !haveU) baseline *= p.qFactor;
+  if (letter === "U" && haveQ && !haveU) baseline += p.qNeedsU;
+  // Glue discipline: a rack already full of vowels doesn't need another.
+  const isVowel = "AEIOU".includes(letter);
+  let vowels = 0;
+  for (const c of "AEIOU") vowels += counts[c.charCodeAt(0) - 65]!;
+  if (isVowel && vowels >= p.vowelCap) baseline *= p.vowelDiscount;
   let value =
     Math.max(immediate, p.potentialWeight * potential, baseline) + flexibility;
 
@@ -198,17 +238,17 @@ export function decideBid(ctx: BidContext): number {
   // useful letter is worth at least our fair share of the remaining
   // budget. Under Vickrey we only pay the runner-up's bid anyway.
   let bid = Math.round(value * p.valueMult);
+  // Endgame: a tile we can't play immediately is wasted money.
+  if (endgame && immediate <= 0) return 0;
   if (value >= p.usefulThreshold) {
-    const expectedWins = Math.max(2, remaining * p.targetWinFrac);
+    const winFrac =
+      remaining > 48 ? p.winFracEarly : remaining < 23 ? p.winFracLate : p.targetWinFrac;
+    const expectedWins = Math.max(2, remaining * winFrac);
     const perTile = Math.floor(ctx.myBalance / expectedWins);
     bid = Math.max(bid, perTile, Math.min(face, 3));
     if (immediate > 0) {
       bid = Math.max(bid, perTile + Math.round(p.immediateBonus * immediate));
     }
-  }
-  if (endgame && bid > 0) {
-    // Nothing to save money for; outbid the sims' face-value habit.
-    bid = Math.max(bid, Math.min(ctx.myBalance, face + 3));
   }
   if (bid <= 0) return 0;
   return Math.max(1, Math.min(bid, cap, ctx.myBalance));
@@ -245,10 +285,19 @@ export function chooseWord(ctx: WordContext): string | null {
   // the rack change triggers another call for the rest.
   if (remaining <= p.endgameBag) return best.word;
 
-  // A long word is the whole point. Take it.
-  if (best.word.length >= p.playNowLen) return best.word;
+  // A long word is the whole point, but early on only a *good* one:
+  // a 7-letter word of 1-point letters pays 21; waiting a few tiles for
+  // a premium letter turns it into 40-60.
+  if (best.word.length >= p.playNowLen) {
+    if (remaining <= p.midgameBag || best.reward >= p.playNowReward) {
+      return best.word;
+    }
+    if (total >= p.holdMaxRack) return best.word;
+    return null;
+  }
 
-  // Cash-starved: convert something so we can keep bidding.
+  // Cash-starved: convert something so we can keep bidding. Leaders play
+  // no 2-3 letter words before the endgame, so this needs a real crunch.
   if (balance < p.cashFloor && best.reward >= p.cashMinReward) return best.word;
 
   // Rack is bloated and still nothing long: recycle the best option.
