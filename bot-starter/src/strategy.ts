@@ -102,6 +102,8 @@ export interface StrategyParams {
   playNowReward: number;
   // Never bid above this on a single Z/Q from baseline alone.
   maxPremiumBid: number;
+  // Below this many tiles left, premium baselines taper to the glue price.
+  premiumTaperBag: number;
   // --- Countermeasures (Vickrey tactics against the live leaders) ---
   // Price pushing: bid at least (market - pushUnder) on every letter we
   // don't want, so the winner (usually a leader's glue) pays market
@@ -154,6 +156,7 @@ export const PARAMS: StrategyParams = {
   midgameBag: 40,
   playNowReward: 40,
   maxPremiumBid: 28,
+  premiumTaperBag: 25,
   pushUnder: 1,
   pushMinBalance: 30,
   richPremium: 2,
@@ -244,6 +247,16 @@ export function decideBid(ctx: BidContext): number {
       (face >= 5 && face <= 8 ? p.bigPremium : 0),
   );
   if (face >= 10) baseline = Math.min(baseline, p.maxPremiumBid);
+  // A premium letter bought with the bag nearly empty rarely finds its
+  // word (J@30 at bag 15 became JO for 9). Taper the baseline toward the
+  // glue price as the bag runs down; completing a word still bids fully
+  // through `immediate`.
+  const remainingNow = ctx.bagRemaining ?? 60;
+  if (face >= 4 && remainingNow < p.premiumTaperBag) {
+    const glue = p.marketA + p.marketB;
+    const t = Math.max(0, remainingNow) / p.premiumTaperBag;
+    baseline = glue + (baseline - glue) * t;
+  }
   const haveU = counts["U".charCodeAt(0) - 65]! > 0;
   const haveQ = counts["Q".charCodeAt(0) - 65]! > 0;
   if (letter === "Q" && !haveU) baseline *= p.qFactor;

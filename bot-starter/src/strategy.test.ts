@@ -76,6 +76,12 @@ test("decideBid keeps a Z bid near market, not stacked premiums", () => {
   assert.ok(z <= 30, `z bid ${z} too high`);
 });
 
+test("decideBid tapers premium bids late unless they complete a word", () => {
+  const early = decideBid({ letter: "J", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 50, index });
+  const late = decideBid({ letter: "J", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 12, index });
+  assert.ok(late < early - 5, `early=${early} late=${late}`);
+});
+
 test("decideBid skips endgame tiles that complete nothing", () => {
   const b = decideBid({ letter: "V", myBalance: 60, myRack: rack("QZ"), bagRemaining: 3, index });
   assert.equal(b, 0);
