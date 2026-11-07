@@ -159,6 +159,12 @@ function tryBid(
   const participant = participantForMatch(conn, matchId);
   if (!participant) return;
   const rack = rackForMatch(conn, matchId);
+  const rivalBalances: number[] = [];
+  for (const p of conn.db.matchParticipant.iter()) {
+    if (p.matchId === matchId && p.botId !== myBotId) {
+      rivalBalances.push(Number(p.balance));
+    }
+  }
   const amount = decideBid({
     letter,
     myBalance: participant.balance,
@@ -166,6 +172,7 @@ function tryBid(
     bagRemaining: bagRemaining(conn, matchId),
     bagCounts: estimatedBag(matchId, rack),
     recentPaid: recentPaidByMatch.get(String(matchId)),
+    rivalBalances,
   });
   if (amount <= 0) return;
   conn.reducers
@@ -234,6 +241,7 @@ function subscribeToMatch(conn: DbConnection, matchId: bigint) {
       const live = [
         tables.auction.where((r) => r.matchId.eq(matchId)),
         tables.auctionResult.where((r) => r.matchId.eq(matchId)),
+        tables.matchParticipant.where((r) => r.matchId.eq(matchId)),
       ].map((q) =>
         conn
           .subscriptionBuilder()

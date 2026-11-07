@@ -102,6 +102,22 @@ export interface StrategyParams {
   playNowReward: number;
   // Never bid above this on a single Z/Q from baseline alone.
   maxPremiumBid: number;
+  // --- Countermeasures (Vickrey tactics against the live leaders) ---
+  // Price pushing: bid at least (market - pushUnder) on every letter we
+  // don't want, so the winner (usually a leader's glue) pays market
+  // instead of a bargain. Under Vickrey we only ever pay the runner-up,
+  // so if we do win we got it cheap. Set pushUnder 99 to disable.
+  pushUnder: number;
+  // Only push while our balance is above this (don't starve ourselves).
+  pushMinBalance: number;
+  // Premium security: when no rival can outspend us, add this on
+  // face >= 4 letters to lock them in.
+  richPremium: number;
+  // Thin field: when at least this many rivals are broke (< brokeBalance),
+  // buy harder; competition for tiles is gone.
+  brokeBalance: number;
+  brokeCount: number;
+  thinFieldBoost: number;
   // Cash crunch: with balance under this and a word worth at least
   // crunchReward in hand, cash it so we can keep buying.
   crunchBalance: number;
@@ -138,6 +154,12 @@ export const PARAMS: StrategyParams = {
   midgameBag: 40,
   playNowReward: 40,
   maxPremiumBid: 28,
+  pushUnder: 1,
+  pushMinBalance: 30,
+  richPremium: 2,
+  brokeBalance: 12,
+  brokeCount: 3,
+  thinFieldBoost: 1.3,
   crunchBalance: 25,
   crunchReward: 25,
 };
@@ -153,6 +175,7 @@ export interface BidContext {
   bagRemaining?: number; // tiles still in the bag (before this one)
   bagCounts?: Record<string, number>; // estimated remaining per letter
   recentPaid?: number[]; // what recent auctions cleared at
+  rivalBalances?: number[]; // other bots' current balances in this match
   params?: Partial<StrategyParams>;
   index?: DictionaryIndex;
 }
@@ -253,9 +276,15 @@ export function decideBid(ctx: BidContext): number {
   let bid = Math.round(value * p.valueMult);
   // Endgame: a tile we can't play immediately is wasted money.
   if (endgame && immediate <= 0) return 0;
+
+  const rivals = ctx.rivalBalances ?? [];
+  const richest = rivals.length ? Math.max(...rivals) : Infinity;
+  const broke = rivals.filter((b) => b < p.brokeBalance).length;
+
   if (value >= p.usefulThreshold) {
-    const winFrac =
+    let winFrac =
       remaining > 48 ? p.winFracEarly : remaining < 23 ? p.winFracLate : p.targetWinFrac;
+    if (broke >= p.brokeCount) winFrac *= p.thinFieldBoost;
     const expectedWins = Math.max(2, remaining * winFrac);
     const perTile = Math.floor(ctx.myBalance / expectedWins);
     bid = Math.max(bid, perTile, Math.min(face, 3));
@@ -263,6 +292,14 @@ export function decideBid(ctx: BidContext): number {
       bid = Math.max(bid, perTile + Math.round(p.immediateBonus * immediate));
     }
   }
+  // Price pushing on letters we'd otherwise let go cheap.
+  if (!endgame && ctx.myBalance >= p.pushMinBalance) {
+    const market = p.marketA + p.marketB * face - p.pushUnder;
+    bid = Math.max(bid, Math.round(market));
+  }
+  // Premium security when nobody at the table can outspend us.
+  if (face >= 4 && richest < ctx.myBalance) bid += p.richPremium;
+
   if (bid <= 0) return 0;
   return Math.max(1, Math.min(bid, cap, ctx.myBalance));
 }

@@ -123,14 +123,14 @@ function report() {
 
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
-  base: {},
-  old25: { marketA: 0, marketB: 0, hvPremium: 0, faceMult: 2.5 },
-  mkt6_2: { marketA: 6, marketB: 2.0 },
-  mkt8_25: { marketA: 8, marketB: 2.5 },
-  prem0: { hvPremium: 0 },
-  prem6: { hvPremium: 6 },
-  mktLowGlue: { marketA: 4, marketB: 3.0 },
-  mktHiGlue: { marketA: 9, marketB: 2.0 },
+  all: {},
+  noPush: { pushUnder: 99 },
+  noRich: { richPremium: 0 },
+  noThin: { thinFieldBoost: 1.0 },
+  none: { pushUnder: 99, richPremium: 0, thinFieldBoost: 1.0 },
+  push2: { pushUnder: 2 },
+  push0: { pushUnder: 0 },
+  rich4: { richPremium: 4 },
 };
 
 const variantArg = (() => {

@@ -180,6 +180,7 @@ export function runMatch(
           myRack: p.rack,
           bagRemaining: remainingBefore,
           bagCounts: estimatedBag(p),
+          rivalBalances: players.filter((q) => q !== p).map((q) => q.balance),
           params: p.spec.params,
           index,
         });
