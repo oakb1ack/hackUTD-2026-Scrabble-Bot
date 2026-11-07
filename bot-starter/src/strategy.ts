@@ -123,6 +123,13 @@ export interface StrategyParams {
   lateReserveBalance: number;
   // Immediate gain needed to spend into the reserve.
   reserveBypassGain: number;
+  // Rack balance: once this share of the rack is premium (face >= 4),
+  // further premium baselines are multiplied by premiumGlut. Match
+  // 43008: 7 premiums, no vowels, three short words. Leaders run ~20%.
+  premiumShareCap: number;
+  premiumGlut: number;
+  // With fewer than this many vowels in the rack, vowels bypass the reserve.
+  minVowels: number;
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
@@ -214,6 +221,9 @@ export const PARAMS: StrategyParams = {
   lateReserveBag: 12,
   lateReserveBalance: 20,
   reserveBypassGain: 15,
+  premiumShareCap: 0.3,
+  premiumGlut: 0.6,
+  minVowels: 2,
   playNowReward7: 30,
   useMarketTable: 1,
   pushUnder: 1,
@@ -334,6 +344,13 @@ export function decideBid(ctx: BidContext): number {
     if (ph >= 1) baseline = Math.max(baseline, median + 1);
     if (face >= 10) baseline = Math.min(baseline, Math.max(p.maxPremiumBid, median + 1));
   }
+  let premiumCount = 0;
+  for (let i = 0; i < 26; i++) {
+    if ((LETTER_VALUE[String.fromCharCode(65 + i)] ?? 0) >= 4) premiumCount += counts[i]!;
+  }
+  if (face >= 4 && total > 0 && premiumCount / total >= p.premiumShareCap) {
+    baseline *= p.premiumGlut;
+  }
   const haveU = counts["U".charCodeAt(0) - 65]! > 0;
   const haveQ = counts["Q".charCodeAt(0) - 65]! > 0;
   if (letter === "Q" && !haveU) baseline *= p.qFactor;
@@ -392,8 +409,10 @@ export function decideBid(ctx: BidContext): number {
   // loophole drained us to balance 4 in match 42998.
   if (immediate < p.reserveBypassGain && remaining > p.lateReserveBag) {
     const reserve = remaining > p.reserveBag ? p.reserveBalance : p.lateReserveBalance;
-    // Premium letters are what the reserve is for; glue respects it.
-    if (face < 4) {
+    // Premium letters are what the reserve is for; glue respects it,
+    // except vowels when the rack can't make words without one.
+    const needVowel = isVowel && vowels < p.minVowels;
+    if (face < 4 && !needVowel) {
       const spendable = ctx.myBalance - reserve;
       if (spendable <= 0) return 0;
       cap = Math.min(cap, spendable);
