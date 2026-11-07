@@ -116,9 +116,20 @@ export interface StrategyParams {
   // tiles per 15 auctions early; we bought 5.1 and were broke by #30.
   reserveBag: number;
   reserveBalance: number;
+  // Second-stage reserve for the late bargain market (bag reserveBag..
+  // lateReserveBag): winners buy W/V/K/J at 12-14 with the bag under 23;
+  // we were at balance 5 then (match 42982).
+  lateReserveBag: number;
+  lateReserveBalance: number;
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
+  // Phase-aware market floor for premium letters (face >= 4): median
+  // clearing prices from 127 live matches, by bag remaining. Early
+  // premiums are overpriced (Z 35, 5-8pt 31) and we don't chase them;
+  // mid/late they drop to 16-22 and that's where winners buy theirs.
+  // Added on top of the market baseline as max(baseline, median + 1).
+  useMarketTable: number; // 1 = on
   // Cash reserve for premium letters: while the bag is above
   // premiumTaperBag, glue (face <= 2) bids may not take balance below
   // this, so a Z/J/X that shows up is affordable. Match 42908: we spent
@@ -145,6 +156,21 @@ export interface StrategyParams {
   // crunchReward in hand, cash it so we can keep buying.
   crunchBalance: number;
   crunchReward: number;
+}
+
+// Median clearing price by phase; index by bag remaining.
+// phases: early (bag > 52), early-mid (37-52), mid (23-36), late (9-22), end (<= 8)
+const MARKET_TABLE: Record<"p4" | "p58" | "pZQ", number[]> = {
+  p4: [21, 19, 16, 17, 12],
+  p58: [31, 26, 22, 17, 13],
+  pZQ: [35, 28, 22, 20, 12],
+};
+function phaseIndex(remaining: number): number {
+  if (remaining > 52) return 0;
+  if (remaining > 36) return 1;
+  if (remaining > 22) return 2;
+  if (remaining > 8) return 3;
+  return 4;
 }
 
 export const PARAMS: StrategyParams = {
@@ -183,7 +209,10 @@ export const PARAMS: StrategyParams = {
   capFloor: 12,
   reserveBag: 40,
   reserveBalance: 35,
+  lateReserveBag: 12,
+  lateReserveBalance: 20,
   playNowReward7: 30,
+  useMarketTable: 1,
   pushUnder: 1,
   pushMinBalance: 30,
   richPremium: 2,
@@ -285,6 +314,15 @@ export function decideBid(ctx: BidContext): number {
     const t = Math.max(0, remainingNow) / taperBag;
     baseline = glue + (baseline - glue) * t;
   }
+  if (p.useMarketTable && face >= 4) {
+    const ph = phaseIndex(remainingNow);
+    const row = face >= 10 ? MARKET_TABLE.pZQ : face >= 5 ? MARKET_TABLE.p58 : MARKET_TABLE.p4;
+    const median = row[ph]!;
+    // Never chase the overpriced early premiums; from early-mid on, be
+    // at least at market so the bargains come to us.
+    if (ph >= 1) baseline = Math.max(baseline, median + 1);
+    if (face >= 10) baseline = Math.min(baseline, Math.max(p.maxPremiumBid, median + 1));
+  }
   const haveU = counts["U".charCodeAt(0) - 65]! > 0;
   const haveQ = counts["Q".charCodeAt(0) - 65]! > 0;
   if (letter === "Q" && !haveU) baseline *= p.qFactor;
@@ -338,10 +376,14 @@ export function decideBid(ctx: BidContext): number {
 
   // First-half reserve: keep money for the cheaper second-half market
   // unless this letter completes a word right now.
-  if (remaining > p.reserveBag && immediate <= 0) {
-    const spendable = ctx.myBalance - p.reserveBalance;
-    if (spendable <= 0) return 0;
-    cap = Math.min(cap, spendable);
+  if (immediate <= 0 && remaining > p.lateReserveBag) {
+    const reserve = remaining > p.reserveBag ? p.reserveBalance : p.lateReserveBalance;
+    // Premium letters are what the reserve is for; glue respects it.
+    if (face < 4) {
+      const spendable = ctx.myBalance - reserve;
+      if (spendable <= 0) return 0;
+      cap = Math.min(cap, spendable);
+    }
   }
   // (legacy knob, off by default)
   if (p.premiumReserve > 0 && face <= 2 && remaining >= p.premiumTaperBag && immediate <= 0) {
