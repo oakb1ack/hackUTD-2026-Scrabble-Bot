@@ -123,14 +123,14 @@ function report() {
 
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
-  all: {},
-  noPush: { pushUnder: 99 },
-  noRich: { richPremium: 0 },
-  noThin: { thinFieldBoost: 1.0 },
-  none: { pushUnder: 99, richPremium: 0, thinFieldBoost: 1.0 },
-  push2: { pushUnder: 2 },
-  push0: { pushUnder: 0 },
-  rich4: { richPremium: 4 },
+  base: {},
+  prev: { reserveBalance: 0, capFloor: 0, winFracEarly: 0.18, maxSpendFrac: 0.6, midgameBag: 40, crunchBalance: 25, crunchReward: 25, premiumTaperBag: 25, midPremiumTaperBag: 25, playNowReward7: 40 },
+  midgame40: { midgameBag: 40 },
+  crunchOld: { crunchBalance: 25, crunchReward: 25 },
+  taperOld: { premiumTaperBag: 25, midPremiumTaperBag: 25 },
+  play7at40: { playNowReward7: 40 },
+  spend60: { maxSpendFrac: 0.6 },
+  cashOnly: { winFracEarly: 0.18, midgameBag: 40, premiumTaperBag: 25, midPremiumTaperBag: 25, playNowReward7: 40 },
 };
 
 const variantArg = (() => {

@@ -56,7 +56,7 @@ test("chooseWord holds a cheap 7-letter word early but plays it by midgame", () 
   // RETAINS = 7 face x 3 = 21: leaders wait for a premium letter instead.
   const early = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 60, myBalance: 80, index });
   assert.equal(early, null);
-  const mid = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 35, myBalance: 80, index });
+  const mid = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 25, myBalance: 80, index });
   assert.ok(mid !== null && mid.length >= 7, `expected a 7+ word, got ${mid}`);
 });
 

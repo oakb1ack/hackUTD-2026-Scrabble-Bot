@@ -102,8 +102,29 @@ export interface StrategyParams {
   playNowReward: number;
   // Never bid above this on a single Z/Q from baseline alone.
   maxPremiumBid: number;
-  // Below this many tiles left, premium baselines taper to the glue price.
+  // Below this many tiles left, premium baselines taper to the glue price
+  // (face >= 8 only; mid-game H/W/Y/K at 12-20 are the bargains winners
+  // use, so those keep full value until the bag is nearly out).
   premiumTaperBag: number;
+  midPremiumTaperBag: number;
+  // The cap never drops below the glue price while we can afford it:
+  // match analysis showed 53% of our mid-game bids pinned at
+  // floor(0.6 x balance) = 7-9 against a flat glue market of 10.
+  capFloor: number;
+  // First-half reserve: while the bag is above reserveBag and the letter
+  // completes nothing, don't spend balance below this. Winners buy 2.5
+  // tiles per 15 auctions early; we bought 5.1 and were broke by #30.
+  reserveBag: number;
+  reserveBalance: number;
+  // A 7-letter word before midgame needs at least this reward (kills
+  // LOONIES for 21); 40+ plays at any length regardless.
+  playNowReward7: number;
+  // Cash reserve for premium letters: while the bag is above
+  // premiumTaperBag, glue (face <= 2) bids may not take balance below
+  // this, so a Z/J/X that shows up is affordable. Match 42908: we spent
+  // down on glue (face 1.64) and then bid 7 on V, J, W and Y that
+  // cleared at 14-22.
+  premiumReserve: number;
   // --- Countermeasures (Vickrey tactics against the live leaders) ---
   // Price pushing: bid at least (market - pushUnder) on every letter we
   // don't want, so the winner (usually a leader's glue) pays market
@@ -131,7 +152,7 @@ export const PARAMS: StrategyParams = {
   potentialWeight: 0.9,
   pOneMissing: 0.35,
   pTwoMissing: 0.1,
-  maxSpendFrac: 0.6,
+  maxSpendFrac: 0.75,
   targetWinFrac: 0.25,
   usefulThreshold: 0,
   endgameBag: 8,
@@ -151,20 +172,26 @@ export const PARAMS: StrategyParams = {
   qNeedsU: 8,
   vowelCap: 4,
   vowelDiscount: 0.85,
-  winFracEarly: 0.18,
+  winFracEarly: 0.12,
   winFracLate: 0.35,
-  midgameBag: 40,
+  midgameBag: 30,
   playNowReward: 40,
   maxPremiumBid: 28,
-  premiumTaperBag: 25,
+  premiumTaperBag: 35,
+  midPremiumTaperBag: 12,
+  premiumReserve: 0,
+  capFloor: 12,
+  reserveBag: 40,
+  reserveBalance: 35,
+  playNowReward7: 30,
   pushUnder: 1,
   pushMinBalance: 30,
   richPremium: 2,
   brokeBalance: 12,
   brokeCount: 3,
   thinFieldBoost: 1.3,
-  crunchBalance: 25,
-  crunchReward: 25,
+  crunchBalance: 30,
+  crunchReward: 18,
 };
 
 // ---------- Bidding ----------
@@ -252,9 +279,10 @@ export function decideBid(ctx: BidContext): number {
   // glue price as the bag runs down; completing a word still bids fully
   // through `immediate`.
   const remainingNow = ctx.bagRemaining ?? 60;
-  if (face >= 4 && remainingNow < p.premiumTaperBag) {
+  const taperBag = face >= 8 ? p.premiumTaperBag : p.midPremiumTaperBag;
+  if (face >= 4 && remainingNow < taperBag) {
     const glue = p.marketA + p.marketB;
-    const t = Math.max(0, remainingNow) / p.premiumTaperBag;
+    const t = Math.max(0, remainingNow) / taperBag;
     baseline = glue + (baseline - glue) * t;
   }
   const haveU = counts["U".charCodeAt(0) - 65]! > 0;
@@ -305,6 +333,23 @@ export function decideBid(ctx: BidContext): number {
       bid = Math.max(bid, perTile + Math.round(p.immediateBonus * immediate));
     }
   }
+  // The cap must not pin us below the glue market while we can pay it.
+  if (!endgame && ctx.myBalance >= p.capFloor) cap = Math.max(cap, p.capFloor);
+
+  // First-half reserve: keep money for the cheaper second-half market
+  // unless this letter completes a word right now.
+  if (remaining > p.reserveBag && immediate <= 0) {
+    const spendable = ctx.myBalance - p.reserveBalance;
+    if (spendable <= 0) return 0;
+    cap = Math.min(cap, spendable);
+  }
+  // (legacy knob, off by default)
+  if (p.premiumReserve > 0 && face <= 2 && remaining >= p.premiumTaperBag && immediate <= 0) {
+    const spendable = ctx.myBalance - p.premiumReserve;
+    if (spendable <= 0) return 0;
+    cap = Math.min(cap, spendable);
+  }
+
   // Price pushing on letters we'd otherwise let go cheap.
   if (!endgame && ctx.myBalance >= p.pushMinBalance) {
     const market = p.marketA + p.marketB * face - p.pushUnder;
@@ -361,7 +406,7 @@ export function chooseWord(ctx: WordContext): string | null {
   // a 7-letter word of 1-point letters pays 21; waiting a few tiles for
   // a premium letter turns it into 40-60.
   if (best.word.length >= p.playNowLen) {
-    if (remaining <= p.midgameBag || best.reward >= p.playNowReward) {
+    if (remaining <= p.midgameBag || best.reward >= p.playNowReward7) {
       return best.word;
     }
     if (total >= p.holdMaxRack) return best.word;
