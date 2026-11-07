@@ -34,10 +34,15 @@ export interface PlayerState {
   rack: Map<string, number>;
   words: string[];
   seenLetters: Map<string, number>; // what this player saw auctioned
+  tilesWon: number;
+  spent: number;
 }
 
 export interface MatchResult {
-  players: { name: string; score: number; balance: number; words: string[]; leftover: number }[];
+  players: {
+    name: string; score: number; balance: number; words: string[];
+    leftover: number; tilesWon: number; spent: number;
+  }[];
   ranks: number[]; // ranks[i] = finishing place of player i (1 = best)
 }
 
@@ -139,6 +144,8 @@ export function runMatch(
     rack: new Map(),
     words: [],
     seenLetters: new Map(),
+    tilesWon: 0,
+    spent: 0,
   }));
 
   for (const p of players) {
@@ -184,6 +191,8 @@ export function runMatch(
       const winner = players[first.i]!;
       if (winner.balance >= paid) {
         winner.balance -= paid;
+        winner.tilesWon++;
+        winner.spent += paid;
         addTile(winner.rack, letter);
         if (winner.spec.kind === "sim") {
           const { counts, total } = rackCounts(winner.rack);
@@ -213,6 +222,8 @@ export function runMatch(
       balance: p.balance,
       words: p.words,
       leftover: rackSize(p.rack),
+      tilesWon: p.tilesWon,
+      spent: p.spent,
     })),
     ranks,
   };

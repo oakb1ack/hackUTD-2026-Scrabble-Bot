@@ -5,6 +5,7 @@
 //   npm run sim -- --self            # 3 copies of ours vs 3 sims
 //   npm run sim -- --ab              # compare PARAMS against variants below
 //   npm run sim -- --verbose         # print one sample match
+//   npm run sim:ab                   # all variants in parallel, one process each
 //
 // Usage from index.ts is identical, so what wins here wins live (against
 // the built-in sims; real teams are another matter).
@@ -43,12 +44,16 @@ interface Agg {
   balance: number;
   longWords: number;
   words: number;
+  tiles: number;
+  spent: number;
 }
 const agg = new Map<string, Agg>();
-function record(name: string, score: number, rank: number, leftover: number, balance: number, ws: string[]) {
+function record(name: string, score: number, rank: number, leftover: number, balance: number, ws: string[], tiles: number, spent: number) {
   const a = agg.get(name) ?? {
-    name, games: 0, score: 0, rankSum: 0, wins: 0, top2: 0, leftover: 0, balance: 0, longWords: 0, words: 0,
+    name, games: 0, score: 0, rankSum: 0, wins: 0, top2: 0, leftover: 0, balance: 0, longWords: 0, words: 0, tiles: 0, spent: 0,
   };
+  a.tiles += tiles;
+  a.spent += spent;
   a.games++;
   a.score += score;
   a.rankSum += rank;
@@ -67,7 +72,7 @@ function play(lineup: PlayerSpec[], matches: number, seedBase: number) {
     const rotated = lineup.map((_, i) => lineup[(i + m) % lineup.length]!);
     const r = runMatch(rotated, index, seedBase * 100_000 + m);
     r.players.forEach((p, i) =>
-      record(p.name, p.score, r.ranks[i]!, p.leftover, p.balance, p.words),
+      record(p.name, p.score, r.ranks[i]!, p.leftover, p.balance, p.words, p.tilesWon, p.spent),
     );
     if (flag("verbose") && m === 0) {
       for (const p of r.players) {
@@ -90,6 +95,8 @@ function report() {
     "words".padStart(6),
     "left".padStart(5),
     "bal".padStart(5),
+    "tiles".padStart(6),
+    "spent".padStart(6),
   );
   for (const a of rows) {
     console.log(
@@ -102,6 +109,8 @@ function report() {
       (a.words / a.games).toFixed(1).padStart(6),
       (a.leftover / a.games).toFixed(1).padStart(5),
       (a.balance / a.games).toFixed(0).padStart(5),
+      (a.tiles / a.games).toFixed(1).padStart(6),
+      (a.spent / a.games).toFixed(0).padStart(6),
     );
   }
 }
@@ -109,15 +118,27 @@ function report() {
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
   base: {},
-  win25: { targetWinFrac: 0.25 },
-  win50: { targetWinFrac: 0.5 },
-  greedy: { playNowLen: 5, fiveLetterMinReward: 0 },
-  cash30: { cashFloor: 30 },
-  useful2: { usefulThreshold: 2 },
-  bigMult: { valueMult: 1.5 },
+  win30: { targetWinFrac: 0.3 },
+  win15: { targetWinFrac: 0.15 },
+  mult1: { valueMult: 1.0 },
+  mult2: { valueMult: 2.0 },
+  play5: { playNowLen: 5, fiveLetterMinReward: 0 },
+  hold13: { holdMaxRack: 13 },
+  endgame12: { endgameBag: 12 },
 };
 
-if (flag("ab")) {
+const variantArg = (() => {
+  const i = args.indexOf("--variant");
+  return i >= 0 ? args[i + 1] : undefined;
+})();
+
+if (variantArg !== undefined) {
+  const params = VARIANTS[variantArg];
+  if (!params) throw new Error(`unknown variant ${variantArg}; have ${Object.keys(VARIANTS).join(", ")}`);
+  play([{ kind: "ours", params, name: variantArg }, ...simLineup(5)], MATCHES, SEED);
+  for (const k of [...agg.keys()]) if (k !== variantArg) agg.delete(k);
+  report();
+} else if (flag("ab")) {
   // Each variant plays its own series vs the same sims, same seeds.
   for (const [name, params] of Object.entries(VARIANTS)) {
     play([{ kind: "ours", params, name }, ...simLineup(5)], MATCHES, SEED);
@@ -126,16 +147,11 @@ if (flag("ab")) {
   for (const k of [...agg.keys()]) if (!(k in VARIANTS)) agg.delete(k);
   report();
 } else if (flag("self")) {
-  play(
-    [
-      { kind: "ours", name: "ours-A" },
-      { kind: "ours", name: "ours-B" },
-      { kind: "ours", name: "ours-C" },
-      ...simLineup(3),
-    ],
-    MATCHES,
-    SEED,
-  );
+  // Head-to-head: the first six variants play each other, no sims.
+  const lineup: PlayerSpec[] = Object.entries(VARIANTS)
+    .slice(0, 6)
+    .map(([name, params]) => ({ kind: "ours", params, name }));
+  play(lineup, MATCHES, SEED);
   report();
 } else {
   play([{ kind: "ours", name: "ours" }, ...simLineup(5)], MATCHES, SEED);

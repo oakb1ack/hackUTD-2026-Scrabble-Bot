@@ -62,13 +62,13 @@ export interface StrategyParams {
 }
 
 export const PARAMS: StrategyParams = {
-  valueMult: 1.0,
+  valueMult: 1.5,
   potentialWeight: 0.9,
   pOneMissing: 0.35,
   pTwoMissing: 0.1,
   maxSpendFrac: 0.6,
-  targetWinFrac: 0.35,
-  usefulThreshold: 1.0,
+  targetWinFrac: 0.2,
+  usefulThreshold: 0,
   endgameBag: 8,
   playNowLen: 6,
   cashFloor: 20,

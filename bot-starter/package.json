@@ -9,7 +9,8 @@
     "test": "node --import tsx --test src/strategy.test.ts",
     "build": "tsc",
     "sim": "tsx src/sim/run.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "sim:ab": "bash scripts/sim-ab.sh"
   },
   "dependencies": {
     "spacetimedb": "^2.12.0",
