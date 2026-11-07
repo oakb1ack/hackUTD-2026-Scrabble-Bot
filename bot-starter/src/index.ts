@@ -218,32 +218,41 @@ const matchSubs = new Map<string, SubscriptionHandle[]>();
 function subscribeToMatch(conn: DbConnection, matchId: bigint) {
   const key = String(matchId);
   if (matchSubs.has(key)) return;
-  const handles = [
-    tables.matchState.where((r) => r.id.eq(matchId)),
-    tables.auction.where((r) => r.matchId.eq(matchId)),
-    tables.auctionResult.where((r) => r.matchId.eq(matchId)),
-  ].map((q) =>
-    conn
-      .subscriptionBuilder()
-      .onApplied(() => {
-        // After a restart we see our old matches too; drop finished ones.
-        const m = conn.db.matchState.id.find(matchId);
-        if (m && m.status.tag === "Ended") {
-          unsubscribeFromMatch(matchId);
-          return;
-        }
-        // Catch an auction that opened before the subscription landed.
-        for (const a of conn.db.auction.iter()) {
-          if (a.matchId === matchId && a.status.tag === "Open") {
-            tryBid(conn, a.id, a.matchId, a.letter);
-          }
-        }
-        tryPlayWord(conn);
-      })
-      .subscribe(q),
-  );
-  matchSubs.set(key, handles);
-  console.log(`[${BOT_NAME}] subscribed to match ${matchId}`);
+  matchSubs.set(key, []);
+  // Phase A: the match_state row alone. If the match is over (we see our
+  // old matches again after every restart) stop here, so we never pull
+  // hundreds of stale auction rows ahead of the live ones.
+  const stateSub = conn
+    .subscriptionBuilder()
+    .onApplied(() => {
+      const m = conn.db.matchState.id.find(matchId);
+      if (!m || m.status.tag !== "Running") {
+        unsubscribeFromMatch(matchId);
+        return;
+      }
+      // Phase B: live auctions and results for this running match.
+      const live = [
+        tables.auction.where((r) => r.matchId.eq(matchId)),
+        tables.auctionResult.where((r) => r.matchId.eq(matchId)),
+      ].map((q) =>
+        conn
+          .subscriptionBuilder()
+          .onApplied(() => {
+            // Catch an auction that opened before the subscription landed.
+            for (const a of conn.db.auction.iter()) {
+              if (a.matchId === matchId && a.status.tag === "Open") {
+                tryBid(conn, a.id, a.matchId, a.letter);
+              }
+            }
+            tryPlayWord(conn);
+          })
+          .subscribe(q),
+      );
+      matchSubs.get(key)?.push(...live);
+      console.log(`[${BOT_NAME}] following match ${matchId}`);
+    })
+    .subscribe(tables.matchState.where((r) => r.id.eq(matchId)));
+  matchSubs.get(key)?.push(stateSub);
 }
 
 function unsubscribeFromMatch(matchId: bigint) {
@@ -266,9 +275,12 @@ function subscribeToMyMatches(conn: DbConnection) {
   conn
     .subscriptionBuilder()
     .onApplied(() => {
-      for (const p of conn.db.matchParticipant.iter()) {
-        if (p.botId === me) subscribeToMatch(conn, p.matchId);
-      }
+      const mine = Array.from(conn.db.matchParticipant.iter())
+        .filter((p) => p.botId === me)
+        .map((p) => p.matchId)
+        .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+        .slice(0, 3);
+      for (const matchId of mine) subscribeToMatch(conn, matchId);
       bootstrapActivity(conn);
     })
     .subscribe(tables.matchParticipant.where((r) => r.botId.eq(me)));
@@ -352,6 +364,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         ? String(r.winnerBotId)
         : "no-bid";
     const mine = winner === String(myBotId) ? " (us)" : "";
+    if (!matchSubs.has(String(r.matchId))) return;
     console.log(
       `[${BOT_NAME}] match ${r.matchId} '${r.letter}' → bot ${winner}${mine} paid ${r.paid}`,
     );
