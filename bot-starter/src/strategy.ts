@@ -132,6 +132,8 @@ export interface StrategyParams {
   premiumGlut: number;
   // With fewer than this many vowels in the rack, vowels bypass the reserve.
   minVowels: number;
+  // Added to every premium bid to win the by-one losses at market.
+  tieBump: number;
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
@@ -250,6 +252,7 @@ export const PARAMS: StrategyParams = {
   premiumShareCap: 0.3,
   premiumGlut: 0.6,
   minVowels: 2,
+  tieBump: 3,
   playNowReward7: 30,
   useMarketTable: 1,
   pushUnder: 1,
@@ -571,6 +574,10 @@ export function decideBid(ctx: BidContext): number {
   }
   // Premium security when nobody at the table can outspend us.
   if (face >= 4 && richest < ctx.myBalance) bid += p.richPremium;
+  // Tie-break bump: match 43031 lost Q/K/X/W by 0-2 at market. Under
+  // Vickrey a higher bid costs nothing unless it wins, and then only the
+  // runner-up's price.
+  if (face >= 4 && !endgame) bid += p.tieBump;
 
   if (bid <= 0) return 0;
   return Math.max(1, Math.min(bid, cap, ctx.myBalance));
