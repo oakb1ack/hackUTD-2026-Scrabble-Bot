@@ -60,6 +60,22 @@ test("chooseWord holds a cheap 7-letter word early but plays it by midgame", () 
   assert.ok(mid !== null && mid.length >= 7, `expected a 7+ word, got ${mid}`);
 });
 
+test("chooseWord cashes a big 6-letter word and cashes out when broke", () => {
+  // BRONZY = 20 face x 2.5 = 50: play it even though it's only 6 letters.
+  const big = chooseWord({ myRack: rack("BRONZY"), dictionary, bagRemaining: 50, myBalance: 100, index });
+  assert.equal(big, "BRONZY");
+  // GAMING = 10 face x 2.5 = 25: hold with cash, play when broke.
+  const rich = chooseWord({ myRack: rack("GAMING"), dictionary, bagRemaining: 50, myBalance: 100, index });
+  assert.equal(rich, null);
+  const broke = chooseWord({ myRack: rack("GAMING"), dictionary, bagRemaining: 50, myBalance: 15, index });
+  assert.ok(broke !== null, "expected a cash-out when broke");
+});
+
+test("decideBid keeps a Z bid near market, not stacked premiums", () => {
+  const z = decideBid({ letter: "Z", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 55, index });
+  assert.ok(z <= 30, `z bid ${z} too high`);
+});
+
 test("decideBid skips endgame tiles that complete nothing", () => {
   const b = decideBid({ letter: "V", myBalance: 60, myRack: rack("QZ"), bagRemaining: 3, index });
   assert.equal(b, 0);

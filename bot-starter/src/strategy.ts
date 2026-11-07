@@ -100,6 +100,12 @@ export interface StrategyParams {
   // 35 at auction 13.
   midgameBag: number;
   playNowReward: number;
+  // Never bid above this on a single Z/Q from baseline alone.
+  maxPremiumBid: number;
+  // Cash crunch: with balance under this and a word worth at least
+  // crunchReward in hand, cash it so we can keep buying.
+  crunchBalance: number;
+  crunchReward: number;
 }
 
 export const PARAMS: StrategyParams = {
@@ -125,12 +131,15 @@ export const PARAMS: StrategyParams = {
   immediateBonus: 0.5,
   bigPremium: 6,
   qNeedsU: 8,
-  vowelCap: 3,
-  vowelDiscount: 0.7,
+  vowelCap: 4,
+  vowelDiscount: 0.85,
   winFracEarly: 0.18,
   winFracLate: 0.35,
   midgameBag: 40,
   playNowReward: 40,
+  maxPremiumBid: 28,
+  crunchBalance: 25,
+  crunchReward: 25,
 };
 
 // ---------- Bidding ----------
@@ -201,13 +210,17 @@ export function decideBid(ctx: BidContext): number {
   }
   const flexibility = p.breadthWeight * Math.log1p(breadth);
 
+  // Premiums only on K/J/X (face 5-8); the formula already exceeds the
+  // market for Z/Q, and a 35 bid on a Z at auction 15 starved us for the
+  // rest of match 42855.
   let baseline = Math.max(
     p.faceMult * face,
     p.marketA +
       p.marketB * face +
-      (face >= 4 ? p.hvPremium : 0) +
-      (face >= 5 ? p.bigPremium : 0),
+      (face >= 4 && face <= 8 ? p.hvPremium : 0) +
+      (face >= 5 && face <= 8 ? p.bigPremium : 0),
   );
+  if (face >= 10) baseline = Math.min(baseline, p.maxPremiumBid);
   const haveU = counts["U".charCodeAt(0) - 65]! > 0;
   const haveQ = counts["Q".charCodeAt(0) - 65]! > 0;
   if (letter === "Q" && !haveU) baseline *= p.qFactor;
@@ -284,6 +297,15 @@ export function chooseWord(ctx: WordContext): string | null {
   // Endgame: everything left unplayed is worthless. Dump the best word;
   // the rack change triggers another call for the rest.
   if (remaining <= p.endgameBag) return best.word;
+
+  // A big payout is worth cashing at any length (BRONZY, 6 letters, 50).
+  if (best.reward >= p.playNowReward) return best.word;
+
+  // Low on cash with a decent word in hand: cash it and keep buying.
+  // Match 42855: balance 16 and a 50-point word held for 40 auctions.
+  if (balance < p.crunchBalance && best.reward >= p.crunchReward) {
+    return best.word;
+  }
 
   // A long word is the whole point, but early on only a *good* one:
   // a 7-letter word of 1-point letters pays 21; waiting a few tiles for
