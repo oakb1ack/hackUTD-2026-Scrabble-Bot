@@ -82,6 +82,15 @@ test("decideBid tapers premium bids late unless they complete a word", () => {
   assert.ok(late < early - 5, `early=${early} late=${late}`);
 });
 
+test("decideBid keeps the first-half reserve against glue", () => {
+  // Balance 40, bag 60: glue may spend at most 40 - 35 = 5.
+  const b = decideBid({ letter: "O", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index });
+  assert.ok(b <= 5, `glue bid ${b} dipped into the reserve`);
+  // A premium letter is what the reserve is for.
+  const z = decideBid({ letter: "Z", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index });
+  assert.ok(z >= 15, `premium bid ${z} blocked by reserve`);
+});
+
 test("decideBid skips endgame tiles that complete nothing", () => {
   const b = decideBid({ letter: "V", myBalance: 60, myRack: rack("QZ"), bagRemaining: 3, index });
   assert.equal(b, 0);

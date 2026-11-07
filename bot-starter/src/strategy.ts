@@ -121,6 +121,8 @@ export interface StrategyParams {
   // we were at balance 5 then (match 42982).
   lateReserveBag: number;
   lateReserveBalance: number;
+  // Immediate gain needed to spend into the reserve.
+  reserveBypassGain: number;
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
@@ -211,6 +213,7 @@ export const PARAMS: StrategyParams = {
   reserveBalance: 35,
   lateReserveBag: 12,
   lateReserveBalance: 20,
+  reserveBypassGain: 15,
   playNowReward7: 30,
   useMarketTable: 1,
   pushUnder: 1,
@@ -384,7 +387,10 @@ export function decideBid(ctx: BidContext): number {
 
   // First-half reserve: keep money for the cheaper second-half market
   // unless this letter completes a word right now.
-  if (immediate <= 0 && remaining > p.lateReserveBag) {
+  // "Completes a word" means a real jump (>= reserveBypassGain), not the
+  // 1-3 point nudge almost any vowel gives the greedy rack value; that
+  // loophole drained us to balance 4 in match 42998.
+  if (immediate < p.reserveBypassGain && remaining > p.lateReserveBag) {
     const reserve = remaining > p.reserveBag ? p.reserveBalance : p.lateReserveBalance;
     // Premium letters are what the reserve is for; glue respects it.
     if (face < 4) {
