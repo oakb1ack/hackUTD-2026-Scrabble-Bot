@@ -215,81 +215,71 @@ function tryPlayWord(conn: DbConnection) {
 
 // Subscriptions. The public tables hold every auction ever run (1.7M rows
 // and counting), so subscribing to everything runs the process out of
-// memory. We subscribe in two phases:
-//   1. Small global tables + per-user views: bot, bot_credential, the
-//      open-lobby views, and my_rack.
-//   2. Once we know our bot id: our match_participant rows. For each match
-//      we're in, the match_state row, its auctions and its results.
-const matchSubs = new Map<string, SubscriptionHandle[]>();
+// memory, and subscribing per match costs a server round trip at the
+// moment the match starts, during which the first dozen auctions close
+// unseen. Instead we keep one rolling *range* subscription: every
+// match_state / auction / auction_result / match_participant row with a
+// match id above the last match we finished. The next match's rows are
+// already streaming when it begins. We re-arm with a higher threshold
+// after each of our matches ends and drop the old range.
+let rangeSubs: SubscriptionHandle[] = [];
+let rangeThreshold = -1n;
+const ourMatches = new Set<string>();
 
-function subscribeToMatch(conn: DbConnection, matchId: bigint) {
-  const key = String(matchId);
-  if (matchSubs.has(key)) return;
-  matchSubs.set(key, []);
-  // Phase A: the match_state row alone. If the match is over (we see our
-  // old matches again after every restart) stop here, so we never pull
-  // hundreds of stale auction rows ahead of the live ones.
-  const stateSub = conn
-    .subscriptionBuilder()
-    .onApplied(() => {
-      const m = conn.db.matchState.id.find(matchId);
-      if (!m || m.status.tag !== "Running") {
-        unsubscribeFromMatch(matchId);
-        return;
-      }
-      // Phase B: live auctions and results for this running match.
-      const live = [
-        tables.auction.where((r) => r.matchId.eq(matchId)),
-        tables.auctionResult.where((r) => r.matchId.eq(matchId)),
-        tables.matchParticipant.where((r) => r.matchId.eq(matchId)),
-      ].map((q) =>
-        conn
-          .subscriptionBuilder()
-          .onApplied(() => {
-            // Catch an auction that opened before the subscription landed.
-            for (const a of conn.db.auction.iter()) {
-              if (a.matchId === matchId && a.status.tag === "Open") {
-                tryBid(conn, a.id, a.matchId, a.letter);
-              }
+function armRange(conn: DbConnection, threshold: bigint) {
+  if (threshold <= rangeThreshold) return;
+  rangeThreshold = threshold;
+  const old = rangeSubs;
+  let applied = 0;
+  const queries = [
+    tables.matchState.where((r) => r.id.gt(threshold)),
+    tables.matchParticipant.where((r) => r.matchId.gt(threshold)),
+    tables.auction.where((r) => r.matchId.gt(threshold)),
+    tables.auctionResult.where((r) => r.matchId.gt(threshold)),
+  ];
+  rangeSubs = queries.map((q) =>
+    conn
+      .subscriptionBuilder()
+      .onApplied(() => {
+        applied++;
+        if (applied === queries.length) {
+          console.log(`[${BOT_NAME}] watching matches > ${threshold}`);
+          // Drop the previous range only once the new one is live.
+          for (const h of old) {
+            try {
+              h.unsubscribe();
+            } catch {
+              // already gone
             }
-            tryPlayWord(conn);
-          })
-          .subscribe(q),
-      );
-      matchSubs.get(key)?.push(...live);
-      console.log(`[${BOT_NAME}] following match ${matchId}`);
-    })
-    .subscribe(tables.matchState.where((r) => r.id.eq(matchId)));
-  matchSubs.get(key)?.push(stateSub);
+          }
+          refreshOurMatches(conn);
+          bootstrapActivity(conn);
+        }
+      })
+      .subscribe(q),
+  );
 }
 
-function unsubscribeFromMatch(matchId: bigint) {
-  const key = String(matchId);
-  for (const h of matchSubs.get(key) ?? []) {
-    try {
-      h.unsubscribe();
-    } catch {
-      // already gone
-    }
+function refreshOurMatches(conn: DbConnection) {
+  if (myBotId === null) return;
+  for (const p of conn.db.matchParticipant.iter()) {
+    if (p.botId === myBotId) ourMatches.add(String(p.matchId));
   }
-  matchSubs.delete(key);
-  seenLettersByMatch.delete(key);
-  recentPaidByMatch.delete(key);
 }
 
 function subscribeToMyMatches(conn: DbConnection) {
   if (myBotId === null) return;
   const me = myBotId;
+  // One-off: find our most recent match id so the range starts just
+  // below it (covers a match we're mid-way through after a restart).
   conn
     .subscriptionBuilder()
     .onApplied(() => {
-      const mine = Array.from(conn.db.matchParticipant.iter())
-        .filter((p) => p.botId === me)
-        .map((p) => p.matchId)
-        .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
-        .slice(0, 3);
-      for (const matchId of mine) subscribeToMatch(conn, matchId);
-      bootstrapActivity(conn);
+      let latest = -1n;
+      for (const p of conn.db.matchParticipant.iter()) {
+        if (p.botId === me && p.matchId > latest) latest = p.matchId;
+      }
+      armRange(conn, latest > 0n ? latest - 1n : 0n);
     })
     .subscribe(tables.matchParticipant.where((r) => r.botId.eq(me)));
 }
@@ -349,10 +339,16 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       tables.myRack,
     ]);
 
-  // A new participant row for us means a new match: follow it.
+  // A new participant row for us means a new match has started.
   conn.db.matchParticipant.onInsert((_ctx, p) => {
     if (myBotId !== null && p.botId === myBotId) {
-      subscribeToMatch(conn, p.matchId);
+      ourMatches.add(String(p.matchId));
+      console.log(`[${BOT_NAME}] in match ${p.matchId}`);
+      for (const a of conn.db.auction.iter()) {
+        if (a.matchId === p.matchId && a.status.tag === "Open") {
+          tryBid(conn, a.id, a.matchId, a.letter);
+        }
+      }
     }
   });
 
@@ -372,7 +368,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         ? String(r.winnerBotId)
         : "no-bid";
     const mine = winner === String(myBotId) ? " (us)" : "";
-    if (!matchSubs.has(String(r.matchId))) return;
+    if (!ourMatches.has(String(r.matchId))) return;
     console.log(
       `[${BOT_NAME}] match ${r.matchId} '${r.letter}' → bot ${winner}${mine} paid ${r.paid}`,
     );
@@ -394,8 +390,11 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         console.log(
           `[${BOT_NAME}] match ${neu.id} ended: score ${mine.score}, balance left ${mine.balance}`,
         );
-        // Keep the subscription briefly so late events settle, then drop.
-        setTimeout(() => unsubscribeFromMatch(neu.id), 5000);
+        seenLettersByMatch.delete(String(neu.id));
+        recentPaidByMatch.delete(String(neu.id));
+        // Move the range up past this match; the next one is already
+        // covered by the current range until the new one applies.
+        armRange(conn, neu.id);
         joinLobby(conn);
       }
     }
@@ -460,7 +459,8 @@ function main() {
     .onDisconnect(() => {
       console.log("disconnected - reconnecting in 3s");
       currentConn = null;
-      matchSubs.clear();
+      rangeSubs = [];
+      rangeThreshold = -1n;
       setTimeout(main, 3000);
     })
     .build();
