@@ -364,12 +364,8 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       );
       const mine = parts.find((p) => p.botId === myBotId);
       if (mine) {
-        const standings = parts
-          .map((p) => Number(p.score))
-          .sort((a, b) => b - a);
-        const place = standings.indexOf(Number(mine.score)) + 1;
         console.log(
-          `[${BOT_NAME}] match ${neu.id} ended: score ${mine.score}, place ${place}/${parts.length}, balance left ${mine.balance}`,
+          `[${BOT_NAME}] match ${neu.id} ended: score ${mine.score}, balance left ${mine.balance}`,
         );
         // Keep the subscription briefly so late events settle, then drop.
         setTimeout(() => unsubscribeFromMatch(neu.id), 5000);

@@ -20,7 +20,10 @@ import {
   type StrategyParams,
 } from "../strategy.js";
 
-export type SimKind = "Cheapskate" | "ValueBidder" | "Aggressive";
+// "Hoarder" is not a built-in sim: it models the real teams seen on the live
+// leaderboard (Nov 2026). They pay a median of ~11 per tile regardless of
+// letter, hoard to 7+ letters for the 3x multiplier, and dump in the endgame.
+export type SimKind = "Cheapskate" | "ValueBidder" | "Aggressive" | "Hoarder";
 
 export type PlayerSpec =
   | { kind: "sim"; strategy: SimKind; name?: string }
@@ -78,13 +81,19 @@ function rackSize(rack: Map<string, number>) {
   return t;
 }
 
-function simBid(kind: SimKind, letter: string, balance: number, jitter: number) {
+function simBid(kind: SimKind, letter: string, balance: number, jitter: number, bagRemaining = 60) {
   const v = LETTER_VALUE[letter] ?? 0;
   const vowel = "AEIOU".includes(letter);
   let base: number;
   if (kind === "Cheapskate") base = v - 1;
   else if (kind === "ValueBidder") base = v;
-  else base = v + (vowel ? 4 : 2);
+  else if (kind === "Aggressive") base = v + (vowel ? 4 : 2);
+  else {
+    // Hoarder: ~11 median, a bit more for high-value letters, spends
+    // faster as the bag runs down. Jitter is wider (±4) for a human field.
+    base = 9 + Math.round(v / 3) + jitter * 2;
+    if (bagRemaining <= 10) base = Math.max(base, Math.floor(balance / 2));
+  }
   return Math.max(0, Math.min(Math.max(base + jitter, 1), balance));
 }
 
@@ -162,7 +171,7 @@ export function runMatch(
     players.forEach((p, i) => {
       let amount = 0;
       if (p.spec.kind === "sim") {
-        amount = simBid(p.spec.strategy, letter, p.balance, rng.int(-2, 2));
+        amount = simBid(p.spec.strategy, letter, p.balance, rng.int(-2, 2), remainingBefore);
       } else {
         amount = decideBid({
           letter,
@@ -196,7 +205,8 @@ export function runMatch(
         addTile(winner.rack, letter);
         if (winner.spec.kind === "sim") {
           const { counts, total } = rackCounts(winner.rack);
-          const w = longestPlay(counts, total, 3, index);
+          const minLen = winner.spec.strategy === "Hoarder" ? (bag.length <= 8 ? 2 : 7) : 3;
+          const w = longestPlay(counts, total, minLen, index);
           if (w) playWordFor(winner, w.word, index);
         }
       }
@@ -204,8 +214,18 @@ export function runMatch(
     for (const p of players) addTile(p.seenLetters, letter);
 
     // Our bots re-evaluate after every auction (index.ts does the same on
-    // matchState.bagTotal changes).
-    for (const p of players) ourWordLoop(p, bag.length, index);
+    // matchState.bagTotal changes). Hoarders dump everything at the end.
+    for (const p of players) {
+      ourWordLoop(p, bag.length, index);
+      if (p.spec.kind === "sim" && p.spec.strategy === "Hoarder" && bag.length <= 3) {
+        for (let g = 0; g < 6; g++) {
+          const { counts, total } = rackCounts(p.rack);
+          const w = longestPlay(counts, total, 2, index);
+          if (!w) break;
+          playWordFor(p, w.word, index);
+        }
+      }
+    }
   }
 
   const order = players

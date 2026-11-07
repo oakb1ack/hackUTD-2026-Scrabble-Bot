@@ -30,8 +30,14 @@ const words = fs
 const index = buildIndex(words);
 
 const SIMS: SimKind[] = ["Cheapskate", "ValueBidder", "Aggressive"];
+// --pro: opponents are Hoarders modelled on the live leaderboard instead of
+// the weak built-in sims.
 const simLineup = (n: number): PlayerSpec[] =>
-  Array.from({ length: n }, (_, i) => ({ kind: "sim", strategy: SIMS[i % 3]! }));
+  Array.from({ length: n }, (_, i) => ({
+    kind: "sim",
+    strategy: flag("pro") ? "Hoarder" : SIMS[i % 3]!,
+    name: flag("pro") ? `hoarder${i}` : undefined,
+  }));
 
 interface Agg {
   name: string;
@@ -118,11 +124,12 @@ function report() {
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
   base: {},
-  win10: { targetWinFrac: 0.1 },
-  spend80: { maxSpendFrac: 0.8 },
-  cash35: { cashFloor: 35 },
-  play5: { playNowLen: 5, fiveLetterMinReward: 8 },
-  pot2: { potentialWeight: 1.5 },
+  hold7: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13 },
+  hold7cash: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, cashFloor: 30 },
+  hold7win20: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, targetWinFrac: 0.2 },
+  hold7win10: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, targetWinFrac: 0.1 },
+  hold6: { fiveLetterMinReward: 99, holdMaxRack: 12 },
+  pot15: { playNowLen: 7, fiveLetterMinReward: 99, holdMaxRack: 13, potentialWeight: 1.5 },
 };
 
 const variantArg = (() => {
