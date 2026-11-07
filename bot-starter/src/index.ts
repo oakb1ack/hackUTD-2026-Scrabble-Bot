@@ -21,8 +21,10 @@
 
 import {
   DbConnection,
+  tables,
   type EventContext,
   type ErrorContext,
+  type SubscriptionHandle,
 } from "./module_bindings/index.js";
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
@@ -204,6 +206,68 @@ function tryPlayWord(conn: DbConnection) {
   }
 }
 
+// Subscriptions. The public tables hold every auction ever run (1.7M rows
+// and counting), so subscribing to everything runs the process out of
+// memory. We subscribe in two phases:
+//   1. Small global tables + per-user views: bot, bot_credential, the
+//      open-lobby views, and my_rack.
+//   2. Once we know our bot id: our match_participant rows. For each match
+//      we're in, the match_state row, its auctions and its results.
+const matchSubs = new Map<string, SubscriptionHandle[]>();
+
+function subscribeToMatch(conn: DbConnection, matchId: bigint) {
+  const key = String(matchId);
+  if (matchSubs.has(key)) return;
+  const handles = [
+    tables.matchState.where((r) => r.id.eq(matchId)),
+    tables.auction.where((r) => r.matchId.eq(matchId)),
+    tables.auctionResult.where((r) => r.matchId.eq(matchId)),
+  ].map((q) =>
+    conn
+      .subscriptionBuilder()
+      .onApplied(() => {
+        // Catch an auction that opened before the subscription landed.
+        for (const a of conn.db.auction.iter()) {
+          if (a.matchId === matchId && a.status.tag === "Open") {
+            tryBid(conn, a.id, a.matchId, a.letter);
+          }
+        }
+        tryPlayWord(conn);
+      })
+      .subscribe(q),
+  );
+  matchSubs.set(key, handles);
+  console.log(`[${BOT_NAME}] subscribed to match ${matchId}`);
+}
+
+function unsubscribeFromMatch(matchId: bigint) {
+  const key = String(matchId);
+  for (const h of matchSubs.get(key) ?? []) {
+    try {
+      h.unsubscribe();
+    } catch {
+      // already gone
+    }
+  }
+  matchSubs.delete(key);
+  seenLettersByMatch.delete(key);
+  recentPaidByMatch.delete(key);
+}
+
+function subscribeToMyMatches(conn: DbConnection) {
+  if (myBotId === null) return;
+  const me = myBotId;
+  conn
+    .subscriptionBuilder()
+    .onApplied(() => {
+      for (const p of conn.db.matchParticipant.iter()) {
+        if (p.botId === me) subscribeToMatch(conn, p.matchId);
+      }
+      bootstrapActivity(conn);
+    })
+    .subscribe(tables.matchParticipant.where((r) => r.botId.eq(me)));
+}
+
 function onConnect(conn: DbConnection, identity: Identity, token: string) {
   myIdentity = identity;
   saveToken(token);
@@ -212,7 +276,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   conn
     .subscriptionBuilder()
     .onApplied(() => {
-      console.log(`[${BOT_NAME}] subscription applied`);
+      console.log(`[${BOT_NAME}] global subscription applied`);
 
       // Resolve our bot id, possibly after claiming a nonce.
       myBotId = resolveMyBotId(conn);
@@ -222,7 +286,6 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
           conn.reducers
             .claimCredential({ code: BOT_NONCE })
             .catch(logFailure("claiming the credential"));
-          // Wait briefly for the credential to land; check again.
           setTimeout(() => {
             myBotId = resolveMyBotId(conn);
             if (myBotId === null) {
@@ -235,7 +298,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
             console.log(
               `[${BOT_NAME}] claimed credential for bot '${bot?.name ?? "?"}' (id ${myBotId})`,
             );
-            bootstrapActivity(conn);
+            subscribeToMyMatches(conn);
           }, 1000);
           return;
         } else {
@@ -250,9 +313,22 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       console.log(
         `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`,
       );
-      bootstrapActivity(conn);
+      subscribeToMyMatches(conn);
     })
-    .subscribeToAllTables();
+    .subscribe([
+      tables.bot,
+      tables.botCredential,
+      tables.openLobbies,
+      tables.openLobbyMembers,
+      tables.myRack,
+    ]);
+
+  // A new participant row for us means a new match: follow it.
+  conn.db.matchParticipant.onInsert((_ctx, p) => {
+    if (myBotId !== null && p.botId === myBotId) {
+      subscribeToMatch(conn, p.matchId);
+    }
+  });
 
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
     if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
@@ -269,23 +345,34 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       r.winnerBotId !== undefined && r.winnerBotId !== null
         ? String(r.winnerBotId)
         : "no-bid";
+    const mine = winner === String(myBotId) ? " (us)" : "";
     console.log(
-      `[${BOT_NAME}] match ${r.matchId} auction ${r.auctionId} '${r.letter}' → bot ${winner} paid ${r.paid}`,
+      `[${BOT_NAME}] match ${r.matchId} '${r.letter}' → bot ${winner}${mine} paid ${r.paid}`,
     );
   });
 
-  // When a match this bot was in ends, hop back into the lobby.
+  // Re-evaluate word play after each auction closes; when a match we were
+  // in ends, report, drop its subscriptions and hop back into the lobby.
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
     if (myBotId === null) return;
     if (neu.status.tag === "Running" && old.bagTotal !== neu.bagTotal) {
       tryPlayWord(conn);
     }
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
-      const wasIn = Array.from(conn.db.matchParticipant.iter()).some(
-        (p) => p.matchId === neu.id && p.botId === myBotId,
+      const parts = Array.from(conn.db.matchParticipant.iter()).filter(
+        (p) => p.matchId === neu.id,
       );
-      if (wasIn) {
-        console.log(`[${BOT_NAME}] match ${neu.id} ended; rejoining lobby`);
+      const mine = parts.find((p) => p.botId === myBotId);
+      if (mine) {
+        const standings = parts
+          .map((p) => Number(p.score))
+          .sort((a, b) => b - a);
+        const place = standings.indexOf(Number(mine.score)) + 1;
+        console.log(
+          `[${BOT_NAME}] match ${neu.id} ended: score ${mine.score}, place ${place}/${parts.length}, balance left ${mine.balance}`,
+        );
+        // Keep the subscription briefly so late events settle, then drop.
+        setTimeout(() => unsubscribeFromMatch(neu.id), 5000);
         joinLobby(conn);
       }
     }
@@ -300,12 +387,10 @@ function joinLobby(conn: DbConnection) {
     return m?.status.tag === "Running";
   });
   if (inRunning) return;
-  const openLobby = Array.from(conn.db.lobby.iter()).find(
-    (l) => l.status.tag === "Open",
-  );
+  const openLobby = Array.from(conn.db.openLobbies.iter())[0];
   const alreadyIn =
     openLobby !== undefined &&
-    Array.from(conn.db.lobbyMember.iter()).some(
+    Array.from(conn.db.openLobbyMembers.iter()).some(
       (lm) => lm.lobbyId === openLobby.id && lm.botId === myBotId,
     );
   if (alreadyIn) return;
@@ -329,13 +414,22 @@ function bootstrapActivity(conn: DbConnection) {
   tryPlayWord(conn);
 }
 
+// The lobby view updates whenever a lobby resolves; if we're idle, join.
+setInterval(() => {
+  if (currentConn && myBotId !== null) joinLobby(currentConn);
+}, 15_000);
+let currentConn: DbConnection | null = null;
+
 function main() {
   console.log(`[${BOT_NAME}] connecting to ${DB_NAME} at ${HOST}`);
   DbConnection.builder()
     .withUri(HOST)
     .withDatabaseName(DB_NAME)
     .withToken(BOT_TOKEN ?? loadToken())
-    .onConnect(onConnect)
+    .onConnect((conn, identity, token) => {
+      currentConn = conn;
+      onConnect(conn, identity, token);
+    })
     .onConnectError((_ctx: ErrorContext, err: Error) =>
       console.error("connect error:", err.message),
     )
