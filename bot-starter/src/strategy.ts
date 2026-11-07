@@ -67,7 +67,7 @@ export const PARAMS: StrategyParams = {
   pOneMissing: 0.35,
   pTwoMissing: 0.1,
   maxSpendFrac: 0.6,
-  targetWinFrac: 0.2,
+  targetWinFrac: 0.15,
   usefulThreshold: 0,
   endgameBag: 8,
   playNowLen: 6,
