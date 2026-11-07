@@ -181,6 +181,7 @@ export function runMatch(
           bagRemaining: remainingBefore,
           bagCounts: estimatedBag(p),
           rivalBalances: players.filter((q) => q !== p).map((q) => q.balance),
+          tilesWon: p.tilesWon,
           params: p.spec.params,
           index,
         });

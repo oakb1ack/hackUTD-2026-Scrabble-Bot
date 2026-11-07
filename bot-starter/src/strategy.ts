@@ -134,6 +134,15 @@ export interface StrategyParams {
   minVowels: number;
   // Added to every premium bid to win the by-one losses at market.
   tieBump: number;
+  // Execution pacing (VWAP-style): target tiles bought by auction index,
+  // following the live winners' purchase profile (2.5/2.6/2.9/4.4/1.4
+  // per 15 auctions = 13.8 tiles). A feedback multiplier scales bids by
+  // 1 + paceGain x (targetTiles - tilesWon), clamped to [paceMin, paceMax].
+  // Replaces hand-tuned reserves as the main pacing mechanism.
+  paceGain: number;
+  paceMin: number;
+  paceMax: number;
+  paceTarget: number; // total tiles to aim for over the match
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
@@ -195,6 +204,21 @@ export interface StrategyParams {
   mcOffset: number;
 }
 
+// Cumulative share of the winners' purchases by auction index (0..68),
+// from live data: 2.5 / 2.6 / 2.9 / 4.4 / 1.4 tiles per 15-auction phase.
+const PACE_PROFILE = [2.5, 2.6, 2.9, 4.4, 1.4];
+function targetTilesAt(auctionIdx: number, total: number): number {
+  const sum = PACE_PROFILE.reduce((a, b) => a + b, 0);
+  let acc = 0;
+  for (let ph = 0; ph < PACE_PROFILE.length; ph++) {
+    const start = ph * 15;
+    const len = ph === 4 ? 8 : 15;
+    const frac = Math.max(0, Math.min(1, (auctionIdx - start) / len));
+    acc += PACE_PROFILE[ph]! * frac;
+  }
+  return (acc / sum) * total;
+}
+
 // Median clearing price by phase; index by bag remaining.
 // phases: early (bag > 52), early-mid (37-52), mid (23-36), late (9-22), end (<= 8)
 const MARKET_TABLE: Record<"p4" | "p58" | "pZQ", number[]> = {
@@ -253,6 +277,10 @@ export const PARAMS: StrategyParams = {
   premiumGlut: 0.6,
   minVowels: 2,
   tieBump: 3,
+  paceGain: 0, // off: sim A/B vs Hoarders lost 3-5 pts at 0.08-0.12; revisit with calibrated sim
+  paceMin: 0.7,
+  paceMax: 1.5,
+  paceTarget: 15,
   playNowReward7: 30,
   useMarketTable: 1,
   pushUnder: 1,
@@ -375,6 +403,7 @@ export interface BidContext {
   bagCounts?: Record<string, number>; // estimated remaining per letter
   recentPaid?: number[]; // what recent auctions cleared at
   rivalBalances?: number[]; // other bots' current balances in this match
+  tilesWon?: number; // tiles we've bought so far this match
   params?: Partial<StrategyParams>;
   index?: DictionaryIndex;
 }
@@ -522,7 +551,15 @@ export function decideBid(ctx: BidContext): number {
   // Pacing floor: unspent balance at match end is worth nothing, so a
   // useful letter is worth at least our fair share of the remaining
   // budget. Under Vickrey we only pay the runner-up's bid anyway.
-  let bid = Math.round(value * p.valueMult);
+  // Execution pacing: behind the winners' purchase curve -> bid up;
+  // ahead -> bid down. Completions are exempt (always worth it).
+  let pace = 1;
+  if (ctx.tilesWon !== undefined && immediate < p.reserveBypassGain) {
+    const auctionIdx = Math.max(0, 68 - remaining);
+    const target = targetTilesAt(auctionIdx, p.paceTarget);
+    pace = Math.max(p.paceMin, Math.min(p.paceMax, 1 + p.paceGain * (target - ctx.tilesWon)));
+  }
+  let bid = Math.round(value * p.valueMult * pace);
   // Endgame: a tile we can't play immediately is wasted money.
   if (endgame && immediate <= 0) return 0;
 

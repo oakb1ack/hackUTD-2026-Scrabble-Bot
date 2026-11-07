@@ -74,6 +74,7 @@ console.log(`[${BOT_NAME}] indexed ${DICTIONARY.length} words`);
 // match (starting racks are hidden, so this is an estimate) and the going
 // rate for letters.
 const seenLettersByMatch = new Map<string, Map<string, number>>();
+const tilesWonByMatch = new Map<string, number>();
 const recentPaidByMatch = new Map<string, number[]>();
 
 function noteAuctionResult(matchId: bigint, letter: string, paid: number) {
@@ -173,6 +174,7 @@ function tryBid(
     bagCounts: estimatedBag(matchId, rack),
     recentPaid: recentPaidByMatch.get(String(matchId)),
     rivalBalances,
+    tilesWon: tilesWonByMatch.get(String(matchId)) ?? 0,
   });
   if (amount <= 0) return;
   conn.reducers
@@ -363,6 +365,10 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   conn.db.auctionResult.onInsert((_ctx, r) => {
     noteAuctionResult(r.matchId, r.letter, Number(r.paid));
     if (myBotId === null) return;
+    if (r.winnerBotId !== undefined && r.winnerBotId !== null && r.winnerBotId === myBotId) {
+      const k = String(r.matchId);
+      tilesWonByMatch.set(k, (tilesWonByMatch.get(k) ?? 0) + 1);
+    }
     const winner =
       r.winnerBotId !== undefined && r.winnerBotId !== null
         ? String(r.winnerBotId)
@@ -392,6 +398,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         );
         seenLettersByMatch.delete(String(neu.id));
         recentPaidByMatch.delete(String(neu.id));
+        tilesWonByMatch.delete(String(neu.id));
         // Move the range up past this match; the next one is already
         // covered by the current range until the new one applies.
         armRange(conn, neu.id);
