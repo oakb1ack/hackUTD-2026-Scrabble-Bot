@@ -66,9 +66,11 @@ export interface StrategyParams {
   faceMult: number;
   // Market-calibrated baseline: marketA + marketB * face reproduces the
   // live clearing prices (Nov 2026: 1-pt ~10, D/G ~12, B/C/M/P ~14,
-  // F/H/V/W/Y ~15-16, K ~17, J/X ~23, Z ~25). The leaders buy 3+ letters
-  // of face >= 4 per game and build 60-point words around them, so
-  // hvPremium is added on those to win more of them.
+  // F/H/V/W/Y ~15-16, K ~17, J/X ~23, Z ~25). The leaders win because
+  // they buy ~21 tiles a match (we bought 13): hoard to 11, play a 7+
+  // word, reinvest, repeat 3-4 times. Glue must be bought at market from
+  // auction one or the flywheel never starts. hvPremium is added on
+  // face >= 4 letters, which anchor the 50-70 point words.
   marketA: number;
   marketB: number;
   hvPremium: number;
@@ -95,7 +97,7 @@ export const PARAMS: StrategyParams = {
   fiveLetterMinReward: 99, // effectively: never play 5-letter words early
   breadthWeight: 0.6,
   faceMult: 0,
-  marketA: 6,
+  marketA: 8,
   marketB: 2.0,
   hvPremium: 3,
   qFactor: 0.6,
