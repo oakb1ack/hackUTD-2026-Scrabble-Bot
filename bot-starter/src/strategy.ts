@@ -123,6 +123,14 @@ export interface StrategyParams {
   // we were at balance 5 then (match 42982).
   lateReserveBag: number;
   lateReserveBalance: number;
+  // Tempo (calibrated sim, Nov 7): we bought 13 of 14 tiles in the first
+  // 31 auctions at peak prices and played our first word at auction 7;
+  // leaders hold ~10 tiles to auction 29-45 and do 60% of their buying
+  // in auctions 31-59 where premiums are 25-40% cheaper. A HARD spending
+  // floor by phase: skip the bid entirely when balance - floor < bid,
+  // unless the letter completes a word (immediate >= reserveBypassGain)
+  // or is a planner target. Phases by bag remaining: >52, >36, >22, >8, rest.
+  spendFloorByPhase: number[];
   // Immediate gain needed to spend into the reserve.
   reserveBypassGain: number;
   // Rack balance: once this share of the rack is premium (face >= 4),
@@ -143,6 +151,21 @@ export interface StrategyParams {
   paceMin: number;
   paceMax: number;
   paceTarget: number; // total tiles to aim for over the match
+  // --- Word-targeting planner ---
+  // From the rack, pick the best 7+ letter words within targetMissing
+  // tiles, weighted by reward x availability of the missing letters in
+  // the bag x targetDecay^missing. For the letter on offer, if it is one
+  // of a target's missing letters, value it at targetShare x reward /
+  // missing (the leaders buy exactly what their next word needs: 80% of
+  // their purchases land in it, vs 73% of ours and 15% never played).
+  targetMissing: number;
+  targetDecay: number;
+  targetShare: number;
+  targetTopN: number;
+  targetMinLen: number;
+  // Only words worth at least this are targets (cheap 7-letter words of
+  // 1-pointers pay 21-30 and aren't worth paying 19 for an E).
+  targetMinReward: number;
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
@@ -202,6 +225,71 @@ export interface StrategyParams {
   //    gain), so letters the rollouts rarely use (J/X/Q/K) bid lower.
   mcMode: number;
   mcOffset: number;
+}
+
+// ---------- Word-targeting planner ----------
+interface Target {
+  idx: number; // index into byReward
+  reward: number;
+  missing: Uint8Array; // per-letter missing counts (26)
+  missingTotal: number;
+  weight: number; // reward x feasibility
+}
+let targetCacheKey = "";
+let targetCache: Target[] = [];
+
+export function planTargets(
+  counts: Uint8Array,
+  total: number,
+  bag: Record<string, number>,
+  p: StrategyParams,
+  index: DictionaryIndex,
+): Target[] {
+  let key = "";
+  for (let i = 0; i < 26; i++) key += counts[i]!.toString(36);
+  key += "|" + Object.values(bag).reduce((a, b) => a + b, 0);
+  if (key === targetCacheKey) return targetCache;
+  const cands = reachableCandidates(counts, total, p.targetMissing, 20000, p.targetMinLen, index);
+  const out: Target[] = [];
+  for (let c = 0; c < cands.length; c++) {
+    const k = cands[c]!;
+    const w = index.byReward[k]!;
+    if (w.reward < p.targetMinReward) continue;
+    const missing = new Uint8Array(26);
+    let missingTotal = 0;
+    let feas = 1;
+    for (let i = 0; i < 26; i++) {
+      const d = w.counts[i]! - counts[i]!;
+      if (d > 0) {
+        missing[i] = d;
+        missingTotal += d;
+        const avail = bag[String.fromCharCode(65 + i)] ?? 0;
+        // Each missing copy needs a tile still in the bag; scarce letters
+        // make the word unlikely.
+        feas *= Math.min(1, avail / (d * 1.5));
+      }
+    }
+    if (feas <= 0) continue;
+    const weight = w.reward * feas * Math.pow(p.targetDecay, missingTotal);
+    out.push({ idx: k, reward: w.reward, missing, missingTotal, weight });
+  }
+  out.sort((a, b) => b.weight - a.weight);
+  targetCache = out.slice(0, p.targetTopN);
+  targetCacheKey = key;
+  return targetCache;
+}
+
+// Value of `slot` toward the current targets: the best share of any
+// target word's reward that this letter unlocks.
+function targetValue(targets: Target[], slot: number, p: StrategyParams): number {
+  let best = 0;
+  for (const t of targets) {
+    if (t.missing[slot]! > 0) {
+      const v = (p.targetShare * t.reward) / Math.max(1, t.missingTotal) + (t.missingTotal === 1 ? 4 : 0);
+      if (v > best) best = v;
+    }
+  }
+  return best;
 }
 
 // Cumulative share of the winners' purchases by auction index (0..68),
@@ -269,9 +357,10 @@ export const PARAMS: StrategyParams = {
   premiumReserve: 0,
   capFloor: 12,
   reserveBag: 40,
-  reserveBalance: 35,
+  reserveBalance: 0, // off: with the planner, direction comes from targets; the reserve starved tile volume
   lateReserveBag: 12,
-  lateReserveBalance: 20,
+  lateReserveBalance: 0,
+  spendFloorByPhase: [42, 24, 8, 0, 0],
   reserveBypassGain: 15,
   premiumShareCap: 0.3,
   premiumGlut: 0.6,
@@ -281,7 +370,13 @@ export const PARAMS: StrategyParams = {
   paceMin: 0.7,
   paceMax: 1.5,
   paceTarget: 15,
-  playNowReward7: 30,
+  targetMissing: 2,
+  targetDecay: 0.6,
+  targetShare: 0.55,
+  targetTopN: 0, // planner off: no gain vs calibrated Leaders (80.0 off vs 78.4 on)
+  targetMinLen: 7,
+  targetMinReward: 42,
+  playNowReward7: 40, // first word should land at a ~10-tile rack, auction 25-30, not auction 7
   useMarketTable: 1,
   pushUnder: 1,
   pushMinBalance: 30,
@@ -289,7 +384,7 @@ export const PARAMS: StrategyParams = {
   brokeBalance: 12,
   brokeCount: 3,
   thinFieldBoost: 1.3,
-  crunchBalance: 30,
+  crunchBalance: 14,
   crunchReward: 18,
   // Monte Carlo valuation (see monteCarloGain). Sim A/B vs Hoarders:
   // mode 1 with offset 2 scored 97 vs 86 for the static premium formula.
@@ -534,8 +629,20 @@ export function decideBid(ctx: BidContext): number {
   let value =
     Math.max(immediate, p.potentialWeight * potential, baseline, mcValue) + flexibility;
 
+  // Word targeting: a letter that one of our target words needs is worth
+  // its share of that word, on top of whatever the market says.
+  let targeted = false;
+  if (p.targetTopN > 0 && total >= 3) {
+    const targets = planTargets(counts, total, bag, p, index);
+    const tv = targetValue(targets, slot, p);
+    if (tv > 0) {
+      targeted = true;
+      value = Math.max(value, tv + (p.marketA + p.marketB * face) * 0.5);
+    }
+  }
+
   // Duplicates of a letter we already hold two of are rarely useful.
-  if (counts[slot]! >= 2) value *= 0.5;
+  if (counts[slot]! >= 2 && !targeted) value *= 0.5;
 
   // 3. Budget pacing. Late in the match money is worth less (it can't be
   //    spent), so loosen the cap; early, keep powder dry.
@@ -586,7 +693,7 @@ export function decideBid(ctx: BidContext): number {
   // "Completes a word" means a real jump (>= reserveBypassGain), not the
   // 1-3 point nudge almost any vowel gives the greedy rack value; that
   // loophole drained us to balance 4 in match 42998.
-  if (immediate < p.reserveBypassGain && remaining > p.lateReserveBag) {
+  if (immediate < p.reserveBypassGain && !targeted && remaining > p.lateReserveBag) {
     const reserve = remaining > p.reserveBag ? p.reserveBalance : p.lateReserveBalance;
     // Premium letters are what the reserve is for; glue respects it,
     // except when the rack can't convert without it: too few vowels, or
@@ -607,8 +714,17 @@ export function decideBid(ctx: BidContext): number {
     cap = Math.min(cap, spendable);
   }
 
-  // Price pushing on letters we'd otherwise let go cheap.
-  if (!endgame && ctx.myBalance >= p.pushMinBalance) {
+  // Hard spending floor by phase (tempo). Completions and planner
+  // targets are exempt.
+  if (immediate < p.reserveBypassGain && !targeted) {
+    const floor = p.spendFloorByPhase[phaseIndex(remaining)] ?? 0;
+    if (ctx.myBalance - floor < Math.max(1, bid)) return 0;
+  }
+
+  // Price pushing on letters we'd otherwise let go cheap, but not while
+  // the spending floor is holding us back: winning early glue at 9-10 is
+  // exactly the front-loading we're trying to stop.
+  if (!endgame && ctx.myBalance >= p.pushMinBalance && remaining <= p.reserveBag) {
     const market = p.marketA + p.marketB * face - p.pushUnder;
     bid = Math.max(bid, Math.round(market));
   }

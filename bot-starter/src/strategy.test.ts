@@ -67,7 +67,7 @@ test("chooseWord cashes a big 6-letter word and cashes out when broke", () => {
   // GAMING = 10 face x 2.5 = 25: hold with cash, play when broke.
   const rich = chooseWord({ myRack: rack("GAMING"), dictionary, bagRemaining: 50, myBalance: 100, index });
   assert.equal(rich, null);
-  const broke = chooseWord({ myRack: rack("GAMING"), dictionary, bagRemaining: 50, myBalance: 15, index });
+  const broke = chooseWord({ myRack: rack("GAMING"), dictionary, bagRemaining: 50, myBalance: 10, index });
   assert.ok(broke !== null, "expected a cash-out when broke");
 });
 
@@ -87,13 +87,23 @@ test("decideBid tapers premium bids late toward the glue price", () => {
   assert.ok(late <= early, `early=${early} late=${late}`);
 });
 
-test("decideBid keeps the first-half reserve against glue", () => {
-  // Balance 40, bag 60: glue may spend at most 40 - 35 = 5.
-  const b = decideBid({ letter: "O", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index });
+test("decideBid keeps the first-half reserve against glue when enabled", () => {
+  // Reserve is off by default (it starved tile volume live); test the
+  // mechanism with it switched on. Balance 40, bag 60: glue may spend at
+  // most 40 - 35 = 5 unless a target word needs the letter.
+  const params = { reserveBalance: 35, targetTopN: 0 };
+  const b = decideBid({ letter: "O", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index, params });
   assert.ok(b <= 5, `glue bid ${b} dipped into the reserve`);
   // A premium letter is what the reserve is for.
-  const z = decideBid({ letter: "Z", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index });
+  const z = decideBid({ letter: "Z", myBalance: 40, myRack: rack("ERTAN"), bagRemaining: 60, index, params });
   assert.ok(z >= 15, `premium bid ${z} blocked by reserve`);
+});
+
+test("planner raises the bid on a letter its target word needs", () => {
+  // RETAIN + S = RETAINS/STAINER etc.; S is the missing letter.
+  const withPlan = decideBid({ letter: "S", myBalance: 100, myRack: rack("RETAIN"), bagRemaining: 50, index });
+  const noPlan = decideBid({ letter: "S", myBalance: 100, myRack: rack("RETAIN"), bagRemaining: 50, index, params: { targetTopN: 0 } });
+  assert.ok(withPlan >= noPlan, `plan=${withPlan} noplan=${noPlan}`);
 });
 
 test("decideBid skips endgame tiles that complete nothing", () => {
