@@ -552,9 +552,12 @@ export function decideBid(ctx: BidContext): number {
   if (immediate < p.reserveBypassGain && remaining > p.lateReserveBag) {
     const reserve = remaining > p.reserveBag ? p.reserveBalance : p.lateReserveBalance;
     // Premium letters are what the reserve is for; glue respects it,
-    // except vowels when the rack can't make words without one.
+    // except when the rack can't convert without it: too few vowels, or
+    // already premium-heavy (match 43043: W Z F Y H cashed as ZEDS and
+    // CROFT for lack of glue while 15 auctions went unbid).
     const needVowel = isVowel && vowels < p.minVowels;
-    if (face < 4 && !needVowel) {
+    const needGlue = total > 0 && premiumCount / total >= p.premiumShareCap;
+    if (face < 4 && !needVowel && !needGlue) {
       const spendable = ctx.myBalance - reserve;
       if (spendable <= 0) return 0;
       cap = Math.min(cap, spendable);
