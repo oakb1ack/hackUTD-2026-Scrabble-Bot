@@ -64,6 +64,14 @@ export interface StrategyParams {
   // ~30 on its own even when no specific word is in sight yet. Live
   // market (Nov 2026): Z 25, J/X 23, K/Q 17, H/Y/F 15, B/C/M/P 14.
   faceMult: number;
+  // Market-calibrated baseline: marketA + marketB * face reproduces the
+  // live clearing prices (Nov 2026: 1-pt ~10, D/G ~12, B/C/M/P ~14,
+  // F/H/V/W/Y ~15-16, K ~17, J/X ~23, Z ~25). The leaders buy 3+ letters
+  // of face >= 4 per game and build 60-point words around them, so
+  // hvPremium is added on those to win more of them.
+  marketA: number;
+  marketB: number;
+  hvPremium: number;
   // Q needs a U; discount its baseline.
   qFactor: number;
   // A letter that completes a word right now is worth the pacing floor
@@ -86,7 +94,10 @@ export const PARAMS: StrategyParams = {
   holdMaxRack: 13,
   fiveLetterMinReward: 99, // effectively: never play 5-letter words early
   breadthWeight: 0.6,
-  faceMult: 2.5,
+  faceMult: 0,
+  marketA: 6,
+  marketB: 2.0,
+  hvPremium: 3,
   qFactor: 0.6,
   immediateBonus: 0.5,
 };
@@ -159,7 +170,10 @@ export function decideBid(ctx: BidContext): number {
   }
   const flexibility = p.breadthWeight * Math.log1p(breadth);
 
-  let baseline = p.faceMult * face;
+  let baseline = Math.max(
+    p.faceMult * face,
+    p.marketA + p.marketB * face + (face >= 4 ? p.hvPremium : 0),
+  );
   if (letter === "Q") baseline *= p.qFactor;
   let value =
     Math.max(immediate, p.potentialWeight * potential, baseline) + flexibility;

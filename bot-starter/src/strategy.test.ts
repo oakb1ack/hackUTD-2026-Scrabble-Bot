@@ -65,8 +65,8 @@ test("decideBid never exceeds balance and is never negative", () => {
 
 test("decideBid values a letter that completes a long word above a useless one", () => {
   const completes = decideBid({ letter: "S", myBalance: 100, myRack: rack("RETAIN"), bagRemaining: 50, index });
-  // A lone V on an empty rack makes nothing; it gets only the pacing floor.
-  const useless = decideBid({ letter: "V", myBalance: 100, myRack: rack(""), bagRemaining: 50, index });
+  // A lone E on an empty rack makes nothing; it gets only the pacing floor.
+  const useless = decideBid({ letter: "E", myBalance: 100, myRack: rack(""), bagRemaining: 50, index });
   assert.ok(completes > useless, `completes=${completes} useless=${useless}`);
 });
 
