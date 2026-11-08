@@ -70,3 +70,27 @@ opponent model. No live process was started or restarted in this review.
 Validation: all 17 tests pass, TypeScript checking passes, and
 `git diff --check` passes. The new regression test covers reversed snapshot
 delivery, duplicate results, and fallback cells without enough samples.
+
+## Live test of c0822d4
+
+Started the authenticated scrabblemaxxing bot with the repaired learner.
+The log is `/private/tmp/scrabble-live-market.log` (not committed).
+
+| Match | Place | Score | Balance left |
+|---|---:|---:|---:|
+| 43307 | 4/6 | 49 | 27 |
+| 43314 | 4/6 | 74 | 43 |
+| 43321 | 4/6 | 70 | 20 |
+
+Mean score 64.3; mean balance left 30; zero top-three finishes in this
+three-game sample. This does not demonstrate a placement improvement.
+In 43307 we bought 11 tiles versus the winner's 18, spent 122 versus
+214, and bought average face value 1.27 versus 2.44. Lost premiums included
+Q at our bid of 23, H at 22, and X at 25. Other premiums were skipped or
+underbid. The priority for the next experiment is useful purchase volume
+and reserve/budget behavior, rather than simply raising the market
+multiplier (which did not improve top-three consistency in screening).
+
+The earlier statement about not restarting the bot applies to the offline
+review above; this subsequent live test explicitly started the bot. It
+remained running after these three results were collected.
