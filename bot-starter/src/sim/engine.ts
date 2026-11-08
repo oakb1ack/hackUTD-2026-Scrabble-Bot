@@ -1,3 +1,4 @@
+import { MarketLearner } from "../market.js";
 // Offline match simulator. Mirrors spacetimedb/src/game.ts closely enough
 // to compare strategies: 6 players, 5-tile starting racks, 98-tile bag,
 // 1 auction per tile, Vickrey with reserve 1, random tie-break, match ends
@@ -345,6 +346,7 @@ export function runMatch(
   index: DictionaryIndex,
   seed: number,
   startingRack = 5,
+  market?: MarketLearner,
 ): MatchResult {
   const rng = makeRng(seed);
   const bag: string[] = [];
@@ -404,6 +406,7 @@ export function runMatch(
           bagCounts: estimatedBag(p),
           rivalBalances: players.filter((q) => q !== p).map((q) => q.balance),
           tilesWon: p.tilesWon,
+          marketTable: market?.table(),
           params: p.spec.params,
           index,
         });
@@ -440,6 +443,7 @@ export function runMatch(
       }
     }
     auctions.push(rec);
+    market?.observe(BigInt(seed), BigInt(seed) * 1000n + BigInt(auctionIdx), letter, rec.paid);
     for (const p of players) addTile(p.seenLetters, letter);
 
     // Our bots re-evaluate after every auction (index.ts does the same on

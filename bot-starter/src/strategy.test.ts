@@ -5,6 +5,22 @@ import * as fs from "node:fs";
 import { test } from "node:test";
 import { buildIndex, rewardFor } from "./dictionary.js";
 import { chooseWord, decideBid } from "./strategy.js";
+import { MarketLearner } from "./market.js";
+
+test("market phases survive shuffled snapshots and duplicate reconnect rows", () => {
+  const market = new MarketLearner();
+  for (let match = 0; match < 8; match++) {
+    // Deliver late auctions first, as a subscription snapshot may do.
+    for (let round = 67; round >= 0; round--) {
+      const id = BigInt(match * 100 + round);
+      const price = round < 16 ? 40 : round < 31 ? 30 : round < 46 ? 20 : round < 60 ? 10 : 5;
+      market.observe(BigInt(match), id, "X", price);
+      market.observe(BigInt(match), id, "X", price);
+    }
+  }
+  assert.deepEqual(market.table().p58, [40, 30, 20, 10, 5]);
+  assert.deepEqual(market.table().p4, [null, null, null, null, null]);
+});
 
 const words = fs
   .readFileSync(new URL("../../spacetimedb/wordlist.txt", import.meta.url), "utf8")

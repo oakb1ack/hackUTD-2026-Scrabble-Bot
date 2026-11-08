@@ -30,6 +30,7 @@ import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { chooseWord, decideBid } from "./strategy.js";
+import { MarketLearner } from "./market.js";
 import { buildIndex, DEFAULT_BAG } from "./dictionary.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
@@ -79,43 +80,9 @@ const tilesWonByMatch = new Map<string, number>();
 // Live market learner: rolling clearing prices per letter class and match
 // phase, from every auction_result we receive (all matches in our range
 // subscription, not just ours). The bot bids from the medians once a cell
-// has MARKET_MIN_SAMPLES; the static table in strategy.ts is the fallback.
-const MARKET_WINDOW = 60;
-const MARKET_MIN_SAMPLES = 8;
-const marketSamples: Record<"p4" | "p58" | "pZQ", number[][]> = {
-  p4: [[], [], [], [], []],
-  p58: [[], [], [], [], []],
-  pZQ: [[], [], [], [], []],
-};
-const auctionsSeenByMatch = new Map<string, number>();
-const FACE: Record<string, number> = {
-  A: 1, B: 3, C: 3, D: 2, E: 1, F: 4, G: 2, H: 4, I: 1, J: 8, K: 5, L: 1, M: 3,
-  N: 1, O: 1, P: 3, Q: 10, R: 1, S: 1, T: 1, U: 1, V: 4, W: 4, X: 8, Y: 4, Z: 10,
-};
-function noteMarket(matchId: bigint, letter: string, paid: number) {
-  const k = String(matchId);
-  const idx = auctionsSeenByMatch.get(k) ?? 0;
-  auctionsSeenByMatch.set(k, idx + 1);
-  const face = FACE[letter] ?? 0;
-  if (face < 4 || paid <= 0) return;
-  const cls = face >= 10 ? "pZQ" : face >= 5 ? "p58" : "p4";
-  const ph = idx < 16 ? 0 : idx < 31 ? 1 : idx < 46 ? 2 : idx < 60 ? 3 : 4;
-  const arr = marketSamples[cls][ph]!;
-  arr.push(paid);
-  if (arr.length > MARKET_WINDOW) arr.shift();
-}
-function liveMarketTable() {
-  const med = (a: number[]) => {
-    if (a.length < MARKET_MIN_SAMPLES) return null;
-    const s = [...a].sort((x, y) => x - y);
-    return s[Math.floor(s.length / 2)]!;
-  };
-  return {
-    p4: marketSamples.p4.map(med),
-    p58: marketSamples.p58.map(med),
-    pZQ: marketSamples.pZQ.map(med),
-  };
-}
+// has eight samples; the static table in strategy.ts is the fallback.
+const market = new MarketLearner();
+function liveMarketTable() { return market.table(); }
 const recentPaidByMatch = new Map<string, number[]>();
 
 function noteAuctionResult(matchId: bigint, letter: string, paid: number) {
@@ -406,7 +373,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
     noteAuctionResult(r.matchId, r.letter, Number(r.paid));
-    noteMarket(r.matchId, r.letter, Number(r.paid));
+    market.observe(r.matchId, r.auctionId, r.letter, Number(r.paid));
     if (myBotId === null) return;
     if (r.winnerBotId !== undefined && r.winnerBotId !== null && r.winnerBotId === myBotId) {
       const k = String(r.matchId);
@@ -446,7 +413,6 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         seenLettersByMatch.delete(String(neu.id));
         recentPaidByMatch.delete(String(neu.id));
         tilesWonByMatch.delete(String(neu.id));
-        auctionsSeenByMatch.delete(String(neu.id));
         // Move the range up past this match; the next one is already
         // covered by the current range until the new one applies.
         armRange(conn, neu.id);

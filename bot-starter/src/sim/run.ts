@@ -1,3 +1,4 @@
+import { MarketLearner } from "../market.js";
 // Run many offline matches and report how our strategy does.
 //
 //   npm run sim                      # ours vs 5 built-in sims, 300 matches
@@ -7,6 +8,7 @@
 //   npm run sim -- --verbose         # print one sample match
 //   npm run sim -- --pro             # opponents are 5 Hoarders (old live model)
 //   npm run sim -- --leaders         # opponents are 5 calibrated Leaders
+//   npm run sim -- --leaders --live-market --ab  # learn prices across matches
 //   npm run sim -- --calib           # 6 Leaders, no us: market vs live facts
 //   npm run sim:ab                   # all variants in parallel, one process each
 //
@@ -156,6 +158,7 @@ interface Agg {
   rankSum: number;
   wins: number;
   top2: number;
+  top3: number;
   leftover: number;
   balance: number;
   longWords: number;
@@ -171,7 +174,7 @@ function record(
   purchases: number[] = [], wordLog: { auction: number }[] = [],
 ) {
   const a = agg.get(name) ?? {
-    name, games: 0, score: 0, rankSum: 0, wins: 0, top2: 0, leftover: 0, balance: 0, longWords: 0, words: 0, tiles: 0, spent: 0,
+    name, games: 0, score: 0, rankSum: 0, wins: 0, top2: 0, top3: 0, leftover: 0, balance: 0, longWords: 0, words: 0, tiles: 0, spent: 0,
     byPhase: [0, 0, 0, 0, 0], firstWord: [],
   };
   for (const idx of purchases) a.byPhase[phaseOf(idx)]!++;
@@ -184,6 +187,7 @@ function record(
   a.rankSum += rank;
   if (rank === 1) a.wins++;
   if (rank <= 2) a.top2++;
+  if (rank <= 3) a.top3++;
   a.leftover += leftover;
   a.balance += balance;
   a.words += ws.length;
@@ -192,10 +196,11 @@ function record(
 }
 
 function play(lineup: PlayerSpec[], matches: number, seedBase: number) {
+  const market = flag("live-market") ? new MarketLearner() : undefined;
   for (let m = 0; m < matches; m++) {
     // Rotate seats so position never matters.
     const rotated = lineup.map((_, i) => lineup[(i + m) % lineup.length]!);
-    const r = runMatch(rotated, index, seedBase * 100_000 + m);
+    const r = runMatch(rotated, index, seedBase * 100_000 + m, 5, market);
     r.players.forEach((p, i) =>
       record(p.name, p.score, r.ranks[i]!, p.leftover, p.balance, p.words, p.tilesWon, p.spent, p.purchases, p.wordLog),
     );
@@ -216,6 +221,7 @@ function report() {
     "avgRank".padStart(8),
     "win%".padStart(6),
     "top2%".padStart(6),
+    "top3%".padStart(6),
     "6+w".padStart(5),
     "words".padStart(6),
     "left".padStart(5),
@@ -233,6 +239,7 @@ function report() {
       (a.rankSum / a.games).toFixed(2).padStart(8),
       ((100 * a.wins) / a.games).toFixed(0).padStart(6),
       ((100 * a.top2) / a.games).toFixed(0).padStart(6),
+      ((100 * a.top3) / a.games).toFixed(0).padStart(6),
       (a.longWords / a.games).toFixed(2).padStart(5),
       (a.words / a.games).toFixed(1).padStart(6),
       (a.leftover / a.games).toFixed(1).padStart(5),
@@ -248,6 +255,10 @@ function report() {
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
   base: {},
+  noMarket: { useMarketTable: 0 },
+  noPush: { pushUnder: 99 },
+  lighterReserve: { spendFloorByPhase: [28, 16, 0, 0, 0] },
+  cashEarlier: { playNowReward: 32, playNowReward7: 32 },
   mult115: { marketMult: 1.15 },
   mult13: { marketMult: 1.3 },
   mult13bump6: { marketMult: 1.3, tieBump: 6 },
@@ -278,6 +289,8 @@ if (flag("calib")) {
   // Each variant plays its own series vs the same sims, same seeds.
   for (const [name, params] of Object.entries(VARIANTS)) {
     play([{ kind: "ours", params, name }, ...simLineup(5)], MATCHES, SEED);
+    const result = agg.get(name)!;
+    console.error(`${name}: score ${(result.score / result.games).toFixed(1)}, top3 ${(100 * result.top3 / result.games).toFixed(1)}% (${result.games} matches)`);
   }
   // Keep only our rows; sim rows are pooled noise here.
   for (const k of [...agg.keys()]) if (!(k in VARIANTS)) agg.delete(k);
