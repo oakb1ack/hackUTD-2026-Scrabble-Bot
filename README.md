@@ -104,6 +104,10 @@ For current experiments, validation, and live-trial limitations, see
 [COMPETITORS.md](COMPETITORS.md) includes word length, seven-plus-letter
 play share, purchases, and unused cash.
 
+## Tournament result — ScrabbleBot tournament 3
+
+`scrabblemaxxing` finished **7th place** in tournament 3 (Nov 8, 2026).
+
 Historical live placements by version (6 bots per match):
 
 | Version | Matches | Avg score | Places |

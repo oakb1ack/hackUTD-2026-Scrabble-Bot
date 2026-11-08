@@ -369,4 +369,6 @@ The profile named after the leaderboard version remains ahead in average score a
 
 The bounded live comparison completed with six matches per profile, excluding the transition through match 46261. Reward54 averaged 90.2 points and place 2.33, versus 82.2 and place 2.50 for reserve cap; it had one win versus two, and five top-three finishes versus four. This small sample supports a further live pilot but is not enough to replace the reserve-cap default by itself. Keep reserve cap as the tournament profile until more live evidence is available. Full results: [docs/experiments/LIVE-REWARD54-TRIAL.md](docs/experiments/LIVE-REWARD54-TRIAL.md).
 
-Tournament 1 is ended and there is no active registration right now. The bot's `TOURNAMENT_ID` registration path and launch command are documented in the root README; set the ID only when registration for a new tournament is open.
+## Tournament result — tournament 3
+
+The `scrabblemaxxing` bot finished **7th place** in the Spacetime ScrabbleBot tournament (Nov 8, 2026). It competed with the reserve-cap baseline. The result is also recorded in the root [README](README.md).
