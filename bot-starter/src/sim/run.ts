@@ -5,9 +5,11 @@ import { MarketLearner } from "../market.js";
 //   npm run sim -- --matches 1000
 //   npm run sim -- --self            # 3 copies of ours vs 3 sims
 //   npm run sim -- --ab              # compare PARAMS against variants below
+//   npm run sim -- --ab --variants base,faceLiquid  # compare a subset
 //   npm run sim -- --verbose         # print one sample match
 //   npm run sim -- --pro             # opponents are 5 Hoarders (old live model)
 //   npm run sim -- --leaders         # opponents are 5 calibrated Leaders
+//   npm run sim -- --leaders --glue-scale 1.2  # stress common-letter prices
 //   npm run sim -- --leaders --live-market --ab  # learn prices across matches
 //   npm run sim -- --calib           # 6 Leaders, no us: market vs live facts
 //   npm run sim:ab                   # all variants in parallel, one process each
@@ -18,6 +20,7 @@ import { MarketLearner } from "../market.js";
 import * as fs from "node:fs";
 import { buildIndex } from "../dictionary.js";
 import { PARAMS, type StrategyParams } from "../strategy.js";
+import { PROFILES, resolveProfile } from "../profiles.js";
 import {
   CLASS_NAMES,
   LIVE_PRICE,
@@ -36,11 +39,18 @@ const opt = (n: string, d: number) => {
 };
 const MATCHES = opt("matches", 300);
 const SEED = opt("seed", 1);
+const GLUE_SCALE = opt("glue-scale", 1);
+if (!Number.isFinite(GLUE_SCALE) || GLUE_SCALE <= 0) {
+  throw new Error("--glue-scale must be a finite positive number");
+}
+// Synthetic stress case, not a claim about live clearing prices. Leader
+// and Spender opponents use this table; premium classes remain unchanged.
+if (GLUE_SCALE !== 1) {
+  for (const cls of [0, 1]) {
+    LIVE_PRICE[cls] = LIVE_PRICE[cls]!.map((price) => price * GLUE_SCALE);
+  }
+}
 
-const words = fs
-  .readFileSync(new URL("../../../spacetimedb/wordlist.txt", import.meta.url), "utf8")
-  .split("\n");
-const index = buildIndex(words);
 
 const SIMS: SimKind[] = ["Cheapskate", "ValueBidder", "Aggressive"];
 // --pro: opponents are Hoarders modelled on the live leaderboard instead of
@@ -255,6 +265,14 @@ function report() {
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
   base: {},
+  noReserve: { spendFloorByPhase: [0, 0, 0, 0, 0] },
+  faceValue: { mcMode: 0 },
+  faceLiquid: { mcMode: 0, spendFloorByPhase: [28, 16, 0, 0, 0] },
+  flowCap: { mcMode: 0, spendFloorByPhase: [28, 16, 0, 0, 0], reserveAsCap: 1 },
+  longFallback: { mcMode: 0, spendFloorByPhase: [28, 16, 0, 0, 0], longWordFallback: 1 },
+  flowLong: { mcMode: 0, spendFloorByPhase: [28, 16, 0, 0, 0], reserveAsCap: 1, longWordFallback: 1 },
+  glue12: { marketA: 10 },
+  liquidGlue: { marketA: 10, spendFloorByPhase: [28, 16, 0, 0, 0] },
   noMarket: { useMarketTable: 0 },
   noPush: { pushUnder: 99 },
   lighterReserve: { spendFloorByPhase: [28, 16, 0, 0, 0] },
@@ -264,10 +282,43 @@ const VARIANTS: Record<string, Partial<StrategyParams>> = {
   mult13bump6: { marketMult: 1.3, tieBump: 6 },
 };
 
+// Preserve the previous production baseline as defaults evolve.
+for (const name of Object.keys(VARIANTS)) {
+  VARIANTS[name] = { mcMode: 1, spendFloorByPhase: [42, 24, 8, 0, 0],
+    reserveAsCap: 0, longWordFallback: 0, refillBonus: 0, ...VARIANTS[name] };
+}
+// Pin the exact profile used in the eight-game live trial. Define these
+// after the historical wrapper so it cannot restore the old MC/reserves.
+const trialBaseline = resolveProfile("liveBaseline");
+VARIANTS.trialBaseline = resolveProfile("liveBaseline");
+for (const name of Object.keys(PROFILES)) VARIANTS[name] = resolveProfile(name);
+for (const bonus of [2, 3, 4]) {
+  VARIANTS[`refill${bonus}`] = { ...trialBaseline, refillBonus: bonus };
+}
+VARIANTS.current = {};
+
+if (flag("list-variants")) {
+  console.log(Object.keys(VARIANTS).join("\n"));
+  process.exit(0);
+}
+
+const subsetAt = args.indexOf("--variants");
+const selectedVariants = subsetAt < 0 ? VARIANTS : Object.fromEntries(
+  (args[subsetAt + 1] ?? "").split(",").map((name) => {
+    if (!VARIANTS[name]) throw new Error(`unknown variant ${name}`);
+    return [name, VARIANTS[name]!];
+  }),
+);
+
 const variantArg = (() => {
   const i = args.indexOf("--variant");
   return i >= 0 ? args[i + 1] : undefined;
 })();
+
+const words = fs
+  .readFileSync(new URL("../../../spacetimedb/wordlist.txt", import.meta.url), "utf8")
+  .split("\n");
+const index = buildIndex(words);
 
 if (flag("calib")) {
   const n = opt("matches", 100);
@@ -287,10 +338,16 @@ if (flag("calib")) {
   report();
 } else if (flag("ab")) {
   // Each variant plays its own series vs the same sims, same seeds.
-  for (const [name, params] of Object.entries(VARIANTS)) {
+  for (const [name, params] of Object.entries(selectedVariants)) {
     play([{ kind: "ours", params, name }, ...simLineup(5)], MATCHES, SEED);
     const result = agg.get(name)!;
-    console.error(`${name}: score ${(result.score / result.games).toFixed(1)}, top3 ${(100 * result.top3 / result.games).toFixed(1)}% (${result.games} matches)`);
+    console.error(
+      `${name}: score ${(result.score / result.games).toFixed(1)}, ` +
+      `avgRank ${(result.rankSum / result.games).toFixed(2)}, ` +
+      `top2 ${(100 * result.top2 / result.games).toFixed(1)}%, ` +
+      `top3 ${(100 * result.top3 / result.games).toFixed(1)}%, ` +
+      `purchases ${(result.tiles / result.games).toFixed(1)} (${result.games} matches)`,
+    );
   }
   // Keep only our rows; sim rows are pooled noise here.
   for (const k of [...agg.keys()]) if (!(k in VARIANTS)) agg.delete(k);
@@ -306,4 +363,6 @@ if (flag("calib")) {
   play([{ kind: "ours", name: "ours" }, ...simLineup(5)], MATCHES, SEED);
   report();
 }
-console.log(`\n${MATCHES} matches, seed ${SEED}, PARAMS=${JSON.stringify(PARAMS)}`);
+console.log(`\n${MATCHES} matches, seed ${SEED}, glueScale=${GLUE_SCALE}, defaults=${JSON.stringify(PARAMS)}`);
+if (variantArg) console.log(`effectiveParams=${JSON.stringify({ ...PARAMS, ...VARIANTS[variantArg] })}`);
+else if (flag("ab")) console.log(`variantOverrides=${JSON.stringify(selectedVariants)}`);

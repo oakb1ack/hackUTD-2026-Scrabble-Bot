@@ -18,12 +18,14 @@
 
 import {
   bestPlay,
+  canSpellCounts,
   DEFAULT_BAG,
   bestPairValue,
   getIndex,
   greedyRackValue,
   missingCount,
   rackCounts,
+  rackMasks,
   reachableCandidates,
   LETTER_VALUE,
   type DictionaryIndex,
@@ -131,6 +133,12 @@ export interface StrategyParams {
   // unless the letter completes a word (immediate >= reserveBypassGain)
   // or is a planner target. Phases by bag remaining: >52, >36, >22, >8, rest.
   spendFloorByPhase: number[];
+  // Experimental: cap affordable bids at balance minus the phase reserve,
+  // instead of skipping when the unconstrained valuation exceeds it.
+  reserveAsCap: number;
+  // Experimental refill premium for suitable new common letters on a
+  // small, funded rack in mid/late game. Clamped to at most 4 currency.
+  refillBonus: number;
   // Immediate gain needed to spend into the reserve.
   reserveBypassGain: number;
   // Rack balance: once this share of the rack is premium (face >= 4),
@@ -138,6 +146,11 @@ export interface StrategyParams {
   // 43008: 7 premiums, no vowels, three short words. Leaders run ~20%.
   premiumShareCap: number;
   premiumGlut: number;
+  // Target a modest share of premium tiles in the rack. When a unique
+  // premium would bring the rack up to this share, this bounded bonus can
+  // help secure it without raising premium bids for already-rich racks.
+  premiumNeedShare: number;
+  premiumNeedBonus: number;
   // With fewer than this many vowels in the rack, vowels bypass the reserve.
   minVowels: number;
   // Added to every premium bid to win the by-one losses at market.
@@ -173,6 +186,9 @@ export interface StrategyParams {
   // A 7-letter word before midgame needs at least this reward (kills
   // LOONIES for 21); 40+ plays at any length regardless.
   playNowReward7: number;
+  // Experimental: consider an eligible long word when the highest-reward
+  // word is shorter and would otherwise be held.
+  longWordFallback: number;
   // Phase-aware market floor for premium letters (face >= 4): median
   // clearing prices from 127 live matches, by bag remaining. Early
   // premiums are overpriced (Z 35, 5-8pt 31) and we don't chase them;
@@ -367,10 +383,16 @@ export const PARAMS: StrategyParams = {
   reserveBalance: 0, // off: with the planner, direction comes from targets; the reserve starved tile volume
   lateReserveBag: 12,
   lateReserveBalance: 0,
-  spendFloorByPhase: [42, 24, 8, 0, 0],
+  spendFloorByPhase: [28, 16, 0, 0, 0],
+  // The completed interleaved live trial favored capping bids to spendable
+  // funds. Keep the old behavior available as the liveBaseline control.
+  reserveAsCap: 1,
+  refillBonus: 0,
   reserveBypassGain: 15,
   premiumShareCap: 0.3,
   premiumGlut: 0.6,
+  premiumNeedShare: 0.22,
+  premiumNeedBonus: 0,
   minVowels: 2,
   tieBump: 3,
   marketMult: 1.0,
@@ -385,6 +407,7 @@ export const PARAMS: StrategyParams = {
   targetMinLen: 7,
   targetMinReward: 42,
   playNowReward7: 40, // first word should land at a ~10-tile rack, auction 25-30, not auction 7
+  longWordFallback: 0,
   useMarketTable: 1,
   pushUnder: 1,
   pushMinBalance: 30,
@@ -394,8 +417,8 @@ export const PARAMS: StrategyParams = {
   thinFieldBoost: 1.3,
   crunchBalance: 14,
   crunchReward: 18,
-  // Monte Carlo valuation (see monteCarloGain). Sim A/B vs Hoarders:
-  // mode 1 with offset 2 scored 97 vs 86 for the static premium formula.
+  // Retain the face-value baseline: fresh Leader trials outperformed
+  // replacement mode when paired with lighter spending reserves.
   mcSamples: 64,
   mcK: 0,
   mcKFrac: 0.22,
@@ -404,7 +427,7 @@ export const PARAMS: StrategyParams = {
   mcWeight: 1.0,
   mcCandidates: 80000,
   mcMissing: 3,
-  mcMode: 1,
+  mcMode: 0,
   mcOffset: 2,
 };
 
@@ -641,6 +664,17 @@ export function decideBid(ctx: BidContext): number {
   let value =
     Math.max(immediate, p.potentialWeight * potential, baseline, mcValue) + flexibility;
 
+  // Strong live bots buy a slightly richer rack than ours. Add a small,
+  // targeted premium bonus only when a unique 4+ point tile would bring
+  // the rack up to its target premium share. This avoids blanket inflation.
+  const premiumShareAfter = (premiumCount + 1) / (total + 1);
+  if (
+    p.premiumNeedBonus > 0 && face >= 4 && counts[slot] === 0 && total >= 4 &&
+    remainingNow > Math.max(12, p.endgameBag) && premiumShareAfter <= p.premiumNeedShare
+  ) {
+    value += p.premiumNeedBonus;
+  }
+
   // Word targeting: a letter that one of our target words needs is worth
   // its share of that word, on top of whatever the market says.
   let targeted = false;
@@ -697,6 +731,25 @@ export function decideBid(ctx: BidContext): number {
       bid = Math.max(bid, perTile + Math.round(p.immediateBonus * immediate));
     }
   }
+
+  // Rebuild a short rack after cashing a word. Repeated market-price
+  // ties on useful glue can otherwise leave a funded rack stalled.
+  // Keep the boost narrow: new common letters, enough cash to continue,
+  // and additions that improve balance or flexible consonants when the
+  // rack has enough vowels. All spending caps and reserves still apply.
+  if (
+    p.refillBonus > 0 && face <= 3 && remaining <= 36 && !endgame &&
+    ctx.myBalance >= 25 && total <= 6 && counts[slot] === 0
+  ) {
+    const closerToBalance = total === 0 ||
+      Math.abs((vowels + (isVowel ? 1 : 0)) / (total + 1) - 0.4) <
+        Math.abs(vowels / total - 0.4);
+    const flexibleConsonant = !isVowel && "RSTLNDGCMPB".includes(letter);
+    if (closerToBalance || (flexibleConsonant && vowels * 3 >= total)) {
+      bid += Math.min(4, Math.round(p.refillBonus));
+    }
+  }
+
   // The cap must not pin us below the glue market while we can pay it.
   if (!endgame && ctx.myBalance >= p.capFloor) cap = Math.max(cap, p.capFloor);
 
@@ -730,7 +783,10 @@ export function decideBid(ctx: BidContext): number {
   // targets are exempt.
   if (immediate < p.reserveBypassGain && !targeted) {
     const floor = p.spendFloorByPhase[phaseIndex(remaining)] ?? 0;
-    if (ctx.myBalance - floor < Math.max(1, bid)) return 0;
+    if (p.reserveAsCap) {
+      cap = Math.min(cap, Math.max(0, ctx.myBalance - floor));
+      if (cap <= 0) return 0;
+    } else if (ctx.myBalance - floor < Math.max(1, bid)) return 0;
   }
 
   // Price pushing on letters we'd otherwise let go cheap, but not while
@@ -813,6 +869,19 @@ export function chooseWord(ctx: WordContext): string | null {
   // letters are more valuable as building material.
   if (best.word.length === 5 && best.reward >= p.fiveLetterMinReward) {
     return best.word;
+  }
+
+  if (p.longWordFallback) {
+    // Eligibility depends on length as well as reward. A short word can
+    // outrank a playable long word while failing the short-word play gate.
+    const alternatives = index.byRewardMaxLen[total] ?? index.byReward;
+    const [mask1, mask2, mask3] = rackMasks(counts);
+    for (const word of alternatives) {
+      if (word.word.length < p.playNowLen || word.word.length > total) continue;
+      if (remaining > p.midgameBag && word.reward < p.playNowReward7) continue;
+      if (word.mask1 & ~mask1 || word.mask2 & ~mask2 || word.mask3 & ~mask3) continue;
+      if (canSpellCounts(word, counts)) return word.word;
+    }
   }
 
   return null;

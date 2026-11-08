@@ -68,12 +68,119 @@ test("chooseWord takes a high-value long word immediately", () => {
   assert.ok(w !== null && w.length >= 7, `expected a 7+ word, got ${w}`);
 });
 
+test("word choice includes length multipliers and prefers reward over raw length", () => {
+  const comparison = buildIndex(["RETAINS", "ZEBRAS"]);
+  const chosen = chooseWord({
+    myRack: rack("ZEBRASTIN"), dictionary, bagRemaining: 50,
+    myBalance: 100, index: comparison,
+  });
+  // Six letters with a Z pay 42, versus 21 for seven cheap letters.
+  assert.equal(chosen, "ZEBRAS");
+  assert.equal(rewardFor("RETAINS"), 21);
+  assert.equal(rewardFor("ZEBRAS"), 42);
+});
+
 test("chooseWord holds a cheap 7-letter word early but plays it by midgame", () => {
   // RETAINS = 7 face x 3 = 21: leaders wait for a premium letter instead.
   const early = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 60, myBalance: 80, index });
   assert.equal(early, null);
   const mid = chooseWord({ myRack: rack("RETAINS"), dictionary, bagRemaining: 25, myBalance: 80, index });
   assert.ok(mid !== null && mid.length >= 7, `expected a 7+ word, got ${mid}`);
+});
+
+test("opt-in long-word fallback considers eligible alternatives to a held short word", () => {
+  // DEOXY pays 32 but fails the early short-word gate; TOGATED pays 27
+  // and is eligible once the match reaches midgame.
+  const context = {
+    myRack: rack("ETXDYATOTAG"), dictionary, myBalance: 80, index,
+  };
+  assert.equal(chooseWord({ ...context, bagRemaining: 25 }), null);
+  const word = chooseWord({
+    ...context, bagRemaining: 25, params: { longWordFallback: 1 },
+  });
+  assert.ok(word !== null && word.length >= 7, `expected a long fallback, got ${word}`);
+  assert.equal(chooseWord({
+    ...context, bagRemaining: 50, params: { longWordFallback: 1 },
+  }), null, "fallback must still respect the early reward gate");
+});
+
+test("opt-in reserve cap permits affordable bids when raw value exceeds the balance", () => {
+  const context = {
+    letter: "E", myBalance: 9, myRack: rack(""), bagRemaining: 30, index,
+    params: { mcSamples: 0, maxSpendFrac: 1, reserveAsCap: 0, spendFloorByPhase: [0, 0, 0, 0, 0] },
+  };
+  assert.equal(decideBid(context), 0);
+  assert.equal(decideBid({
+    ...context, params: { ...context.params, reserveAsCap: 1 },
+  }), 9);
+});
+
+test("opt-in reserve cap constrains tie and security boosts and skips exhausted reserves", () => {
+  const context = {
+    letter: "H", myBalance: 50, myRack: rack(""), bagRemaining: 45,
+    rivalBalances: [20, 30], index,
+    params: {
+      mcSamples: 0, reserveAsCap: 1, spendFloorByPhase: [42, 42, 42, 42, 42],
+      tieBump: 100, richPremium: 100,
+    },
+  };
+  assert.equal(decideBid(context), 8, "boosts must not spend the 42-currency reserve");
+  assert.equal(decideBid({ ...context, myBalance: 42 }), 0);
+});
+
+test("refill bonus helps acquire suitable new letters for a small funded rack", () => {
+  const params = {
+    mcSamples: 0, potentialWeight: 0, breadthWeight: 0, maxSpendFrac: 1,
+    spendFloorByPhase: [0, 0, 0, 0, 0],
+  };
+  for (const [letters, letter] of [["IIYA", "S"], ["BCDF", "E"], ["", "R"]]) {
+    const context = { letter: letter!, myRack: rack(letters!), myBalance: 60, bagRemaining: 24, index, params };
+    const baseline = decideBid(context);
+    assert.equal(decideBid({ ...context, params: { ...params, refillBonus: 2 } }), baseline + 2);
+    assert.equal(decideBid({ ...context, params: { ...params, refillBonus: 100 } }), baseline + 4,
+      "refill bonus must stay bounded even when configured too high");
+  }
+});
+
+test("refill bonus avoids imbalance, duplicates, premiums, and ineligible phases or budgets", () => {
+  const params = {
+    mcSamples: 0, potentialWeight: 0, breadthWeight: 0, maxSpendFrac: 1,
+    spendFloorByPhase: [0, 0, 0, 0, 0],
+  };
+  const common = { myBalance: 60, bagRemaining: 24, index, params };
+  const contexts = [
+    { ...common, myRack: rack("IIYA"), letter: "E" }, // vowel-heavy
+    { ...common, myRack: rack("BCDF"), letter: "S" }, // vowel-deficient
+    { ...common, myRack: rack("IYAS"), letter: "S" }, // already held
+    { ...common, myRack: rack("IIYA"), letter: "H" }, // premium
+    { ...common, myRack: rack("IIYA"), letter: "S", bagRemaining: 50 },
+    { ...common, myRack: rack("IIYA"), letter: "S", bagRemaining: 8 },
+    { ...common, myRack: rack("IIYA"), letter: "S", myBalance: 24 },
+    { ...common, myRack: rack("AERSTNL"), letter: "D" }, // rack already rebuilt
+  ];
+  for (const context of contexts) {
+    assert.equal(decideBid({ ...context, params: { ...params, refillBonus: 2 } }), decideBid(context),
+      `unexpected refill bonus for ${JSON.stringify({ ...context, index: undefined })}`);
+  }
+});
+
+test("refill bonus respects reserves and balance after raising a bid", () => {
+  const params = {
+    mcSamples: 0, potentialWeight: 0, breadthWeight: 0, maxSpendFrac: 1,
+    reserveAsCap: 0, spendFloorByPhase: [20, 20, 20, 20, 20],
+  };
+  const context = { letter: "S", myRack: rack("IIYA"), myBalance: 30, bagRemaining: 30, index, params };
+  assert.equal(decideBid(context), 10);
+  assert.equal(decideBid({ ...context, params: { ...params, refillBonus: 2 } }), 0,
+    "a refill must not bypass the hard spending reserve");
+  assert.equal(decideBid({ ...context, params: { ...params, refillBonus: 2, reserveAsCap: 1 } }), 10);
+  for (const myBalance of [0, 1, 24, 25, 30, 60]) {
+    for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+      const bid = decideBid({ ...context, myBalance, letter, params: { ...params, refillBonus: 4 } });
+      assert.ok(Number.isInteger(bid) && bid >= 0 && bid <= myBalance,
+        `refill bid ${bid} exceeds balance ${myBalance}`);
+    }
+  }
 });
 
 test("chooseWord cashes a big 6-letter word and cashes out when broke", () => {
@@ -89,7 +196,8 @@ test("chooseWord cashes a big 6-letter word and cashes out when broke", () => {
 
 test("decideBid keeps a Z bid near market, not stacked premiums", () => {
   const z = decideBid({ letter: "Z", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 55, index });
-  assert.ok(z <= 30, `z bid ${z} too high`);
+  // The observed early Z/Q median is 32; retaining face value bids 31.
+  assert.ok(z <= 32, `z bid ${z} exceeds the early market median`);
 });
 
 test("decideBid tapers premium bids late toward the glue price", () => {
@@ -150,6 +258,30 @@ test("decideBid prices a Z far above a 1-point letter on a thin rack", () => {
   const z = decideBid({ letter: "Z", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 50, index });
   const e = decideBid({ letter: "E", myBalance: 100, myRack: rack("ERTAN"), bagRemaining: 50, index });
   assert.ok(z >= 20 && z > e + 8, `z=${z} e=${e}`);
+});
+
+test("premium scarcity bonus only rewards a unique premium that fills the rack target", () => {
+  const params = {
+    mcSamples: 0, potentialWeight: 0, breadthWeight: 0, maxSpendFrac: 1,
+    spendFloorByPhase: [0, 0, 0, 0, 0], reserveAsCap: 1,
+    useMarketTable: 0, tieBump: 0, premiumNeedShare: 0.22, premiumNeedBonus: 0,
+  };
+  const context = {
+    letter: "H", myBalance: 60, myRack: rack("AERST"), bagRemaining: 30, index, params,
+  };
+  const baseline = decideBid(context);
+  assert.equal(decideBid({
+    ...context, params: { ...params, premiumNeedBonus: 3 },
+  }), baseline + 3);
+  assert.equal(decideBid({
+    ...context, myRack: rack("AERSTH"), params: { ...params, premiumNeedBonus: 3 },
+  }), decideBid({ ...context, myRack: rack("AERSTH") }), "do not bonus a duplicate");
+  assert.equal(decideBid({
+    ...context, myRack: rack("HHFFX"), letter: "J", params: { ...params, premiumNeedBonus: 3 },
+  }), decideBid({ ...context, myRack: rack("HHFFX"), letter: "J" }), "do not bonus a premium-heavy rack");
+  assert.equal(decideBid({
+    ...context, bagRemaining: 12, params: { ...params, premiumNeedBonus: 3 },
+  }), decideBid({ ...context, bagRemaining: 12 }), "do not bonus near the endgame");
 });
 
 // The bot can't see a match move on while it searches, so a slow search

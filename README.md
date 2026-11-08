@@ -40,8 +40,18 @@ cd bot-starter
 npm test                 # invariants: bids <= balance, words spellable, <100 ms
 npm run sim              # 300 offline matches vs the built-in sims
 npm run sim -- --ab      # compare PARAMS variants (edit VARIANTS in src/sim/run.ts)
-npm run sim -- --self    # 3 copies of our bot vs 3 sims
+npm run sim -- --self    # first six variants against each other
+npm run sim -- --leaders --live-market --ab --variants base,faceLiquid
+python3 ../scripts/competitors.py --matches 120  # completed-game opponent report
 ```
+
+Parallel comparisons from the repository root:
+
+```bash
+python3 scripts/compare_strategies.py --matches 40 --seed 17 --workers 4 --both-markets
+```
+
+See the [experiment index](docs/experiments/README.md) for strategy comparisons and detailed trial records. Offline percentages are screening results, not calibrated live win-rate predictions.
 
 The simulator (`src/sim/`) mirrors the module's rules and its sim bots. If a
 change doesn't improve avgRank / top2% there, don't ship it.
@@ -54,8 +64,9 @@ change doesn't improve avgRank / top2% there, don't ship it.
   we bid what the letter is worth: the improvement in the best word we can
   play now, or the probability-weighted value of 5+ letter words it brings
   us within two tiles of (using the estimated remaining bag).
-- **Pacing.** Cap each bid at a fraction of balance mid-game; in the
-  endgame money is worthless, so spend freely.
+- **Pacing.** Cap each bid at a fraction of balance mid-game and at the
+  available balance after the phase reserve. In the endgame money is
+  worthless, so spend freely.
 - **Hoard, then cash out.** Hold short words, play 6+ letter words at once,
   play 5-letter words only when they pay well, cash out if balance is low or
   the rack is bloated, and dump everything when the bag is nearly empty.
@@ -74,7 +85,26 @@ Pulled from the public `auction_result` / `word_play` tables with
   Z, X, Q or J, often from the starting rack.
 - **Unspent balance is wasted.** Score is total reward; money only gates it.
 
-Live placements by version (6 bots per match):
+## Tournament start
+
+When tournament registration is open, start the bot with its tournament ID:
+
+```bash
+cd bot-starter
+BOT_NAME=scrabblemaxxing TOURNAMENT_ID=123 npm start
+```
+
+Replace `123` with the new tournament ID. The bot registers through its team credential, then joins the live lobby. The
+registration call is safe to retry. Restart at a completed-match boundary so
+the process starts with the tournament setting. Tournament setup is managed
+by an admin; never point the bot at an ended tournament ID.
+
+For current experiments, validation, and live-trial limitations, see
+[STRATEGY-EVALUATION.md](STRATEGY-EVALUATION.md). The opponent report in
+[COMPETITORS.md](COMPETITORS.md) includes word length, seven-plus-letter
+play share, purchases, and unused cash.
+
+Historical live placements by version (6 bots per match):
 
 | Version | Matches | Avg score | Places |
 |---|---|---|---|

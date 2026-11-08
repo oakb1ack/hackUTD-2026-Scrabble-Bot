@@ -334,6 +334,9 @@ function ourWordLoop(p: PlayerState, bagRemaining: number, index: DictionaryInde
   }
 }
 
+// Composition remains an approximation: subtracting the current rack can
+// double-count auction wins and reintroduce played starting tiles. Keep this
+// limitation separate from the live auction-timing contract below.
 function estimatedBag(p: PlayerState): Record<string, number> {
   const bag: Record<string, number> = { ...DEFAULT_BAG };
   for (const [l, n] of p.seenLetters) bag[l] = Math.max(0, (bag[l] ?? 0) - n);
@@ -379,8 +382,11 @@ export function runMatch(
   for (const p of players) {
     for (let n = 0; n < startingRack && bag.length; n++) addTile(p.rack, bag.pop()!);
   }
+  // Live startup has already drawn the first offer out of bagTotal.
   // Starting racks might already hold a word.
-  for (const p of players) ourWordLoop(p, bag.length, index);
+  if (bag.length > 0) {
+    for (const p of players) ourWordLoop(p, bag.length - 1, index);
+  }
   const totalAuctions = bag.length;
 
   while (bag.length > 0) {
@@ -402,7 +408,7 @@ export function runMatch(
           letter,
           myBalance: p.balance,
           myRack: p.rack,
-          bagRemaining: remainingBefore,
+          bagRemaining: bag.length,
           bagCounts: estimatedBag(p),
           rivalBalances: players.filter((q) => q !== p).map((q) => q.balance),
           tilesWon: p.tilesWon,
@@ -434,9 +440,10 @@ export function runMatch(
         winner.purchases.push(auctionIdx);
         rec = { idx: auctionIdx, letter, paid, winner: first.i, bids: bids.length };
         addTile(winner.rack, letter);
-        if (winner.spec.kind === "sim" && winner.spec.strategy !== "Leader") {
+        if (winner.spec.kind === "sim" && winner.spec.strategy !== "Leader" &&
+            (winner.spec.strategy !== "Hoarder" || bag.length > 0)) {
           const { counts, total } = rackCounts(winner.rack);
-          const minLen = winner.spec.strategy === "Hoarder" ? (bag.length <= 8 ? 2 : 7) : 3;
+          const minLen = winner.spec.strategy === "Hoarder" ? (bag.length - 1 <= 8 ? 2 : 7) : 3;
           const w = longestPlay(counts, total, minLen, index);
           if (w) playWordFor(winner, w.word, index, auctionIdx);
         }
@@ -446,14 +453,18 @@ export function runMatch(
     market?.observe(BigInt(seed), BigInt(seed) * 1000n + BigInt(auctionIdx), letter, rec.paid);
     for (const p of players) addTile(p.seenLetters, letter);
 
-    // Our bots re-evaluate after every auction (index.ts does the same on
-    // matchState.bagTotal changes). Hoarders dump everything at the end.
+    // The server settles, runs a built-in winner's automatic play, then
+    // immediately draws the next offer or ends the match. External bots
+    // observe the next offer already excluded from bagTotal, and cannot
+    // submit words after the final settlement.
+    if (bag.length === 0) continue;
+    const visibleBag = bag.length - 1;
     for (const p of players) {
-      ourWordLoop(p, bag.length, index, auctionIdx);
+      ourWordLoop(p, visibleBag, index, auctionIdx);
       if (p.spec.kind === "sim" && p.spec.strategy === "Leader") {
-        leaderWordLoop(p, bag.length, auctionIdx, index);
+        leaderWordLoop(p, visibleBag, auctionIdx, index);
       }
-      if (p.spec.kind === "sim" && p.spec.strategy === "Hoarder" && bag.length <= 3) {
+      if (p.spec.kind === "sim" && p.spec.strategy === "Hoarder" && visibleBag <= 3) {
         for (let g = 0; g < 6; g++) {
           const { counts, total } = rackCounts(p.rack);
           const w = longestPlay(counts, total, 2, index);

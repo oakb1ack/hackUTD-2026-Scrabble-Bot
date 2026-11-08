@@ -29,8 +29,9 @@ import {
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { chooseWord, decideBid } from "./strategy.js";
+import { chooseWord, decideBid, PARAMS } from "./strategy.js";
 import { MarketLearner } from "./market.js";
+import { MatchProfileSelector } from "./profiles.js";
 import { buildIndex, DEFAULT_BAG } from "./dictionary.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
@@ -39,6 +40,49 @@ const BOT_NAME = process.env.BOT_NAME ?? "bot";
 const BOT_TOKEN = process.env.BOT_TOKEN; // from the website, first run only
 const BOT_NONCE = process.env.BOT_NONCE; // from the CLI, first run only
 const TOURNAMENT_ID = process.env.TOURNAMENT_ID;
+// Run a bounded live refill experiment without changing the baseline defaults.
+const configuredRefillBonus = Number(process.env.BOT_REFILL_BONUS ?? PARAMS.refillBonus);
+if (!Number.isInteger(configuredRefillBonus) || configuredRefillBonus < 0 || configuredRefillBonus > 4) {
+  throw new Error("BOT_REFILL_BONUS must be an integer from 0 to 4");
+}
+const LIVE_PARAMS = { ...PARAMS, refillBonus: configuredRefillBonus };
+const profileNames = process.env.BOT_PROFILES?.split(",").map((name) => name.trim());
+const profileSelector = profileNames ? new MatchProfileSelector(profileNames) : null;
+const profileLimit = Number(process.env.BOT_PROFILE_GAMES ?? 8);
+if (!Number.isInteger(profileLimit) || profileLimit < 1) {
+  throw new Error("BOT_PROFILE_GAMES must be a positive integer");
+}
+const assignmentPath = process.env.BOT_PROFILE_LOG;
+if (profileSelector && !assignmentPath) {
+  throw new Error("BOT_PROFILE_LOG is required for a live comparison");
+}
+let experimentCutoff: bigint | null = null;
+let experimentCompleteLogged = false;
+const matchStrategies = new Map<string, typeof LIVE_PARAMS>();
+
+function paramsForMatch(matchId: bigint): typeof LIVE_PARAMS {
+  if (!profileSelector || experimentCutoff === null || matchId <= experimentCutoff) return LIVE_PARAMS;
+  const key = String(matchId);
+  const existing = matchStrategies.get(key);
+  if (existing) return existing;
+  // The experiment is bounded; later matches use the fixed baseline.
+  if (matchStrategies.size >= profileLimit) {
+    if (!experimentCompleteLogged) {
+      console.log(`[${BOT_NAME}] experiment complete; match ${matchId} and later use baseline`);
+      experimentCompleteLogged = true;
+    }
+    return LIVE_PARAMS;
+  }
+  const chosen = profileSelector.select(key);
+  const params = { ...LIVE_PARAMS, ...chosen.params };
+  const assignment = { match: key, profile: chosen.name, trial_game: matchStrategies.size + 1,
+    started_utc: new Date().toISOString(), params };
+  fs.appendFileSync(assignmentPath!, JSON.stringify(assignment) + "\n");
+  matchStrategies.set(key, params);
+  console.log(`[${BOT_NAME}] experiment game ${assignment.trial_game}/${profileLimit}: match ${matchId}, profile ${chosen.name}`);
+  return params;
+}
+
 const TOKEN_PATH = path.join(process.cwd(), `.token-${BOT_NAME}`);
 
 function loadToken(): string | undefined {
@@ -70,12 +114,15 @@ const DICTIONARY: string[] = fs.existsSync(dictionaryPath)
 DICTIONARY.sort((a, b) => b.length - a.length); // longest first for greedy pick
 buildIndex(DICTIONARY);
 console.log(`[${BOT_NAME}] indexed ${DICTIONARY.length} words`);
+console.log(`[${BOT_NAME}] strategy started ${new Date().toISOString()} params=${JSON.stringify(LIVE_PARAMS)}`);
+if (profileNames) console.log(`[${BOT_NAME}] rotating profiles ${profileNames.join(",")} for ${profileLimit} games; then baseline`);
 
 // Public auction results let us track the remaining bag composition per
 // match (starting racks are hidden, so this is an estimate) and the going
 // rate for letters.
 const seenLettersByMatch = new Map<string, Map<string, number>>();
 const tilesWonByMatch = new Map<string, number>();
+const recordedAuctionIds = new Set<bigint>();
 
 // Live market learner: rolling clearing prices per letter class and match
 // phase, from every auction_result we receive (all matches in our range
@@ -174,24 +221,31 @@ function tryBid(
       rivalBalances.push(Number(p.balance));
     }
   }
+  const remaining = bagRemaining(conn, matchId);
   const amount = decideBid({
     letter,
     myBalance: participant.balance,
     myRack: rack,
-    bagRemaining: bagRemaining(conn, matchId),
+    bagRemaining: remaining,
     bagCounts: estimatedBag(matchId, rack),
     recentPaid: recentPaidByMatch.get(String(matchId)),
     rivalBalances,
     tilesWon: tilesWonByMatch.get(String(matchId)) ?? 0,
     marketTable: liveMarketTable(),
+    params: paramsForMatch(matchId),
   });
-  if (amount <= 0) return;
+  if (amount <= 0) {
+    console.log(`[${BOT_NAME}] skip '${letter}' (match ${matchId}, auction ${auctionId})` +
+      ` balance=${participant.balance} bag=${remaining} rack=${[...rack].map(([l, n]) => l.repeat(n)).join("")}`);
+    return;
+  }
   conn.reducers
     .submitBid({ auctionId, amount: BigInt(amount) })
     .catch(logFailure(`bid on auction ${auctionId}`));
   bidsByAuction.add(key);
   console.log(
-    `[${BOT_NAME}] bid ${amount} on '${letter}' (match ${matchId}, auction ${auctionId})`,
+    `[${BOT_NAME}] bid ${amount} on '${letter}' (match ${matchId}, auction ${auctionId})` +
+      ` balance=${participant.balance} bag=${remaining} rack=${[...rack].map(([l, n]) => l.repeat(n)).join("")}`,
   );
 }
 
@@ -215,6 +269,7 @@ function tryPlayWord(conn: DbConnection) {
       dictionary: DICTIONARY,
       bagRemaining: bagRemaining(conn, matchId),
       myBalance: participantForMatch(conn, matchId)?.balance,
+      params: paramsForMatch(matchId),
     });
     if (!word) continue;
     console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
@@ -289,6 +344,10 @@ function subscribeToMyMatches(conn: DbConnection) {
       let latest = -1n;
       for (const p of conn.db.matchParticipant.iter()) {
         if (p.botId === me && p.matchId > latest) latest = p.matchId;
+      }
+      if (profileSelector && experimentCutoff === null) {
+        experimentCutoff = latest;
+        console.log(`[${BOT_NAME}] experiment excludes transition through match ${latest}`);
       }
       armRange(conn, latest > 0n ? latest - 1n : 0n);
     })
@@ -372,6 +431,12 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
+    // Reconnect snapshots must not count purchases or bag removals twice.
+    if (recordedAuctionIds.has(r.auctionId)) return;
+    recordedAuctionIds.add(r.auctionId);
+    if (recordedAuctionIds.size > 20000) {
+      recordedAuctionIds.delete(recordedAuctionIds.values().next().value!);
+    }
     noteAuctionResult(r.matchId, r.letter, Number(r.paid));
     market.observe(r.matchId, r.auctionId, r.letter, Number(r.paid));
     if (myBotId === null) return;
