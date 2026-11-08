@@ -247,11 +247,10 @@ function report() {
 
 // Parameter variants to A/B. Edit freely.
 const VARIANTS: Record<string, Partial<StrategyParams>> = {
-  // approximates the build live at 18:40: no spending floor, early cash-outs, no planner
-  live: { spendFloorByPhase: [0, 0, 0, 0, 0], playNowReward7: 30, crunchBalance: 30, targetTopN: 0, reserveBalance: 35, lateReserveBalance: 20 },
-  tempo: {},
-  tempoNoPlan: { targetTopN: 0 },
-  tempoSoft: { spendFloorByPhase: [30, 15, 0, 0, 0] },
+  base: {},
+  mult115: { marketMult: 1.15 },
+  mult13: { marketMult: 1.3 },
+  mult13bump6: { marketMult: 1.3, tieBump: 6 },
 };
 
 const variantArg = (() => {

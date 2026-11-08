@@ -142,6 +142,10 @@ export interface StrategyParams {
   minVowels: number;
   // Added to every premium bid to win the by-one losses at market.
   tieBump: number;
+  // Premium bids sit at marketMult x the live median from early-mid on.
+  // At 1.0 we set the price and lose as runner-up (K@31/31, Q@30/30,
+  // Z@32/32 in match 43166); winners pay above median and convert.
+  marketMult: number;
   // Execution pacing (VWAP-style): target tiles bought by auction index,
   // following the live winners' purchase profile (2.5/2.6/2.9/4.4/1.4
   // per 15 auctions = 13.8 tiles). A feedback multiplier scales bids by
@@ -309,10 +313,13 @@ function targetTilesAt(auctionIdx: number, total: number): number {
 
 // Median clearing price by phase; index by bag remaining.
 // phases: early (bag > 52), early-mid (37-52), mid (23-36), late (9-22), end (<= 8)
+// Fallback when the live learner has too few samples. Re-measured from
+// matches 43000-43174 (Nov 7, 18:00 CST): the field got more aggressive
+// over the evening, mid/late premiums up 3-8 from the afternoon table.
 const MARKET_TABLE: Record<"p4" | "p58" | "pZQ", number[]> = {
-  p4: [21, 19, 16, 17, 12],
-  p58: [31, 26, 22, 17, 13],
-  pZQ: [35, 28, 22, 20, 12],
+  p4: [19, 18, 18, 16, 11],
+  p58: [27, 26, 25, 23, 14],
+  pZQ: [32, 33, 30, 22, 11],
 };
 function phaseIndex(remaining: number): number {
   if (remaining > 52) return 0;
@@ -366,6 +373,7 @@ export const PARAMS: StrategyParams = {
   premiumGlut: 0.6,
   minVowels: 2,
   tieBump: 3,
+  marketMult: 1.0,
   paceGain: 0, // off: sim A/B vs Hoarders lost 3-5 pts at 0.08-0.12; revisit with calibrated sim
   paceMin: 0.7,
   paceMax: 1.5,
@@ -499,6 +507,9 @@ export interface BidContext {
   recentPaid?: number[]; // what recent auctions cleared at
   rivalBalances?: number[]; // other bots' current balances in this match
   tilesWon?: number; // tiles we've bought so far this match
+  // Live market medians by class ("p4" | "p58" | "pZQ") and phase, learned
+  // from the auction_result stream; cells with too few samples are null.
+  marketTable?: Record<"p4" | "p58" | "pZQ", (number | null)[]>;
   params?: Partial<StrategyParams>;
   index?: DictionaryIndex;
 }
@@ -600,11 +611,12 @@ export function decideBid(ctx: BidContext): number {
   }
   if (p.useMarketTable && face >= 4) {
     const ph = phaseIndex(remainingNow);
-    const row = face >= 10 ? MARKET_TABLE.pZQ : face >= 5 ? MARKET_TABLE.p58 : MARKET_TABLE.p4;
-    const median = row[ph]!;
+    const cls = face >= 10 ? "pZQ" : face >= 5 ? "p58" : "p4";
+    const live = ctx.marketTable?.[cls]?.[ph];
+    const median = live ?? MARKET_TABLE[cls][ph]!;
     // Never chase the overpriced early premiums; from early-mid on, be
     // at least at market so the bargains come to us.
-    if (ph >= 1) baseline = Math.max(baseline, median + 1);
+    if (ph >= 1) baseline = Math.max(baseline, median * p.marketMult + 1);
     if (face >= 10) baseline = Math.min(baseline, Math.max(p.maxPremiumBid, median + 1));
   }
   let premiumCount = 0;
